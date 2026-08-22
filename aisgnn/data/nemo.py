@@ -215,15 +215,26 @@ def find_geometry(simulation: str, root: Path | None = None) -> Path | None:
 
 
 def find_melt(simulation: str, root: Path | None = None) -> Path | None:
-    """Locate the 2-D reference melt field for a simulation."""
+    """Locate the reference NEMO melt field for a simulation.
+
+    The ``melt_rates_2D_NEMO*`` files are the ocean model's own melt and are the
+    emulator's target.  The ``melt_rates_2D_boxes`` and ``_plumes`` files sitting
+    beside them hold melt produced by PICO-style *parameterisations*; training on
+    those would teach the emulator to reproduce a parameterisation rather than
+    the simulation, so the NEMO files are matched first and explicitly.
+    """
     root = Path(root) if root is not None else RAW_DIR
-    for base, pattern in (
+    for base, patterns in (
         (root / "burgard2022" / "processed" / "MELT_RATE",
-         f"nemo_5km_{simulation}/melt_rates_2D_*_timmean_oneFRIS.nc"),
+         (f"nemo_5km_{simulation}/melt_rates_2D_NEMO_timmean.nc",
+          f"nemo_5km_{simulation}/melt_rates_2D_NEMO.nc")),
         (root / "burgard2023" / "processed" / "MELT_RATE",
-         f"{simulation}/melt_rates_2D_*.nc"),
+         (f"{simulation}/melt_rates_2D_NEMO_timmean.nc",
+          f"{simulation}/melt_rates_2D_NEMO.nc")),
     ):
-        if base.is_dir():
+        if not base.is_dir():
+            continue
+        for pattern in patterns:
             hits = sorted(base.glob(pattern))
             if hits:
                 return hits[0]

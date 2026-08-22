@@ -249,20 +249,34 @@ SMOKE_TEST_SHELVES = ("Filchner-Ronne", "Ross", "Getz", "Pine Island", "Thwaites
 # --------------------------------------------------------------------------- #
 
 #: Node features fed to every emulator, in a fixed order.
+#:
+#: This list is what the published archives actually contain, which is less than
+#: the research plan assumed.  The NEMO ensembles distribute temperature,
+#: salinity, thermal forcing and geometry at the ice draft, but **no horizontal
+#: velocity, mixed-layer depth or in-cavity stratification**.  Any hypothesis
+#: about a shift from thermal-driving control to circulation control therefore
+#: cannot be tested on these fields directly; stratification has to come from
+#: the separately archived continental-shelf T/S profiles (see
+#: :data:`PROFILE_FEATURES`), and velocity is simply unavailable.
 NODE_FEATURES = (
     "T",              # potential temperature at the ice draft, degC
     "S",              # practical salinity at the ice draft, g/kg
-    "u_mag",          # horizontal current speed, m/s
-    "thermal_driving",  # T - T_f, degC
-    "mld",            # mixed-layer depth, m
-    "N2",             # squared Brunt-Vaisala frequency, 1/s2
+    "thermal_driving",  # T - T_f, degC, supplied directly as thermal_forcing
     "ice_draft",      # depth of the ice base, m (negative down)
     "water_column",   # cavity water-column thickness, m
     "bed_depth",      # bedrock depth, m (negative down)
     "slope_ice",      # magnitude of the ice-draft gradient, dimensionless
+    "slope_bed",      # magnitude of the bedrock gradient, dimensionless
     "dist_gl",        # distance to the grounding line, m
     "dist_front",     # distance to the ice-shelf front, m
     "coriolis",       # f = 2 Omega sin(lat), 1/s
+    "entry_depth",    # deepest depth at which water can enter the cavity, m
+)
+
+#: Derived from the archived continental-shelf profiles, appended when available.
+PROFILE_FEATURES = (
+    "N2_shelf",       # squared Brunt-Vaisala frequency on the shelf, 1/s2
+    "T_gradient",     # vertical temperature gradient at the draft depth, degC/m
 )
 
 #: Edge features for the edge-conditioned network.

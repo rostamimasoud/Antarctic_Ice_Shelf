@@ -30,18 +30,21 @@ def synthetic_cavity(nx: int = 12, ny: int = 10, dx: float = 5000.0, seed: int =
     fields = {
         "T": -1.8 + 1.5 * xs / xs.max(),
         "S": 34.4 + 0.3 * rng.random((ny, nx)),
-        "u_mag": 0.02 + 0.05 * rng.random((ny, nx)),
         "thermal_driving": 0.2 + 1.0 * xs / xs.max(),
-        "mld": 50.0 + 30.0 * rng.random((ny, nx)),
-        "N2": 1e-6 * (1.0 + rng.random((ny, nx))),
         "ice_draft": draft,
         "water_column": wct,
         "bed_depth": bed,
         "slope_ice": 1e-3 * rng.random((ny, nx)),
+        "slope_bed": 2e-3 * rng.random((ny, nx)),
         "dist_gl": xs,
         "dist_front": xs.max() - xs,
         "coriolis": np.full((ny, nx), -1.4e-4),
+        "entry_depth": bed - 50.0,
     }
+    # Guard against the feature list and this fixture drifting apart: a missing
+    # key would otherwise surface as an unrelated KeyError in every test.
+    missing = set(NODE_FEATURES) - set(fields)
+    assert not missing, f"fixture is missing node features: {sorted(missing)}"
     target = 0.5 + 4.0 * xs / xs.max()
     return fields, mask, xs, ys, target, dx
 
@@ -148,8 +151,8 @@ def test_build_graph_excludes_masked_cells():
 
 def test_build_graph_rejects_missing_features():
     fields, mask, xs, ys, target, dx = synthetic_cavity()
-    del fields["N2"]
-    with pytest.raises(KeyError, match="N2"):
+    del fields["thermal_driving"]
+    with pytest.raises(KeyError, match="thermal_driving"):
         build_graph(fields, mask, xs, ys, target, radius=dx, cell_area=dx * dx)
 
 
