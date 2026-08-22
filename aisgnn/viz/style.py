@@ -70,9 +70,23 @@ DIVERGING = LinearSegmentedColormap.from_list(
 MELT = LinearSegmentedColormap.from_list(
     "aisgnn_melt", ["#F7F7F5", "#CFE3EC", "#8FC0D6", "#E8C07A", "#D55E00", "#7A2E00"])
 
+def _register(cmap) -> None:
+    """Register a colormap across matplotlib versions, ignoring re-registration."""
+    try:
+        mpl.colormaps.register(cmap)                       # matplotlib >= 3.6
+        return
+    except AttributeError:
+        pass
+    except ValueError:
+        return                                             # already registered
+    try:
+        mpl.cm.register_cmap(name=cmap.name, cmap=cmap)    # matplotlib < 3.6
+    except (AttributeError, ValueError):
+        pass
+
+
 for _cm in (SEQUENTIAL, DIVERGING, MELT):
-    if _cm.name not in mpl.colormaps:
-        mpl.colormaps.register(_cm)
+    _register(_cm)
 
 
 # --------------------------------------------------------------------------- #
@@ -147,8 +161,13 @@ RC = {
 
 
 def use_style() -> None:
-    """Apply the manuscript rcParams globally."""
-    mpl.rcParams.update(RC)
+    """Apply the manuscript rcParams globally.
+
+    Keys unknown to the installed matplotlib are skipped rather than raising, so
+    the same figures build on an older local install and on the cluster.
+    """
+    known = {k: v for k, v in RC.items() if k in mpl.rcParams}
+    mpl.rcParams.update(known)
 
 
 # --------------------------------------------------------------------------- #

@@ -435,9 +435,14 @@ def bifurcation_diagram(base: BoxParams, parameter: str, p_start: float,
     The branch is traced towards decreasing and then increasing ``parameter``
     and the halves are joined, so a single :class:`Branch` spans the whole
     S-shaped curve including the unstable middle segment.
+
+    The starting point comes from :meth:`CavityBoxModel.equilibrium`, not from a
+    bare Newton solve: the nominal initial guess lies outside the basin for
+    several cavities, and Newton either fails outright or lands on the unstable
+    branch, which starts the continuation in the wrong place.
     """
     model = CavityBoxModel(base.with_control(**{parameter: p_start}))
-    x0 = model.steady_state(model.initial_state(regime))
+    x0 = model.equilibrium(regime)
     p_scale = max(abs(p_max - p_min) / 20.0, 1e-6)
 
     back = continue_branch(base, parameter, x0, p_start, p_min, p_max, ds=ds,
@@ -458,3 +463,51 @@ def bifurcation_diagram(base: BoxParams, parameter: str, p_start: float,
     )
 
     return merged, find_folds(base, merged, p_scale), hysteresis(base, merged)
+
+
+# --------------------------------------------------------------------------- #
+# Two-parameter bistability map
+# --------------------------------------------------------------------------- #
+
+def bistability_map(base: BoxParams, x_parameter: str, x_values: np.ndarray,
+                    y_parameter: str, y_values: np.ndarray,
+                    regimes: tuple[str, str] = ("cold", "warm")
+                    ) -> dict[str, np.ndarray]:
+    """Map which regimes are attractors over a plane of two control parameters.
+
+    For every point on the grid the model is relaxed from both a cold and a warm
+    initial condition; a point is bistable when both relax to their own regime.
+    This is the two-parameter view of the fold structure and is the natural way
+    to present the results when only one of the two parameters actually carries
+    a saddle-node.
+
+    Returns
+    -------
+    dict
+        ``cold``/``warm`` boolean grids of shape ``(len(y_values), len(x_values))``,
+        ``bistable`` where both hold, and ``melt_cold``/``melt_warm`` grids with
+        NaN where that regime is not an attractor.
+    """
+    nx, ny = len(x_values), len(y_values)
+    cold = np.zeros((ny, nx), bool)
+    warm = np.zeros((ny, nx), bool)
+    melt_cold = np.full((ny, nx), np.nan)
+    melt_warm = np.full((ny, nx), np.nan)
+
+    for j, yv in enumerate(y_values):
+        for i, xv in enumerate(x_values):
+            p = base.with_control(**{x_parameter: float(xv), y_parameter: float(yv)})
+            model = CavityBoxModel(p)
+            for regime, mask, melt in ((regimes[0], cold, melt_cold),
+                                       (regimes[1], warm, melt_warm)):
+                try:
+                    x = model.equilibrium(regime)
+                except RuntimeError:
+                    continue
+                mask[j, i] = True
+                melt[j, i] = model.diagnostics(x).melt_rate
+
+    return {"x_parameter": x_parameter, "y_parameter": y_parameter,
+            "x": np.asarray(x_values, float), "y": np.asarray(y_values, float),
+            "cold": cold, "warm": warm, "bistable": cold & warm,
+            "melt_cold": melt_cold, "melt_warm": melt_warm}
