@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -l
 #SBATCH --job-name=ais_env
 #SBATCH --partition=io
 #SBATCH --qos=io
@@ -14,10 +14,14 @@
 #
 #   sbatch slurm/env_setup.sh
 #
-# Note on `module load`: the load must happen in this shell, not in a pipeline.
-# Piping it (`module load anaconda/2025 | head`) runs it in a subshell, so the
-# PATH change is discarded and every later conda call fails with "command not
-# found" while the load itself appears to have succeeded.
+# Two things about `module` in a batch script, both of which fail silently-ish:
+#
+#  1. The shebang must be `#!/bin/bash -l`.  A SLURM batch script runs in a
+#     non-interactive, non-login shell, which never sources the module
+#     initialisation, so `module` is simply not a command.
+#  2. The load must happen in this shell, not in a pipeline.  Piping it
+#     (`module load anaconda/2025 | head`) runs it in a subshell and the PATH
+#     change is discarded, while the load itself appears to have succeeded.
 
 set -euo pipefail
 
