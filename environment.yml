@@ -1,0 +1,41 @@
+name: aisgnn
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  # --- numerics -----------------------------------------------------------
+  - numpy>=1.26
+  - scipy>=1.11
+  - pandas>=2.1
+  - scikit-learn>=1.3
+  # --- geoscience I/O ------------------------------------------------------
+  - xarray>=2023.12
+  - netcdf4
+  - h5netcdf
+  - dask
+  - zarr
+  - bottleneck
+  - pyproj
+  - cartopy
+  # --- deep learning ------------------------------------------------------
+  - pytorch>=2.2
+  - pytorch-cuda=12.1
+  - torchvision
+  # --- plotting -----------------------------------------------------------
+  - matplotlib>=3.8
+  - seaborn
+  # --- tooling ------------------------------------------------------------
+  - pytest
+  - ruff
+  - tqdm
+  - pyyaml
+  - jupyterlab
+  - pip:
+      # Installed via pip: the conda builds lag the PyTorch version.
+      - torch-geometric>=2.5
+      - shap>=0.44
+      - captum>=0.7
+      - umap-learn>=0.5
