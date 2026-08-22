@@ -31,22 +31,46 @@ from ..config import RAW_DIR, SIMULATIONS
 # --------------------------------------------------------------------------- #
 
 #: Canonical field -> candidate variable names, most specific first.
+#:
+#: Names confirmed against the extracted archives.  Note that the pieces are
+#: spread across three different files and, for the geometry, a different grid:
+#: masks and distances are 1200x1200 on the 5 km stereographic grid, whereas
+#: ``corrected_draft_bathy_isf.nc`` is 1334x1334 and must be regridded before
+#: use (see :func:`load_geometry`).
 CANDIDATES: dict[str, tuple[str, ...]] = {
+    # From processed/MELT_RATE/.../melt_rates_2D_*.nc
     "melt_rate": ("melt_m_ice_per_y", "melt_cavity", "melt_rate", "meltrate",
                   "fwfisf", "sowflisf", "melt"),
-    "T": ("theta_in", "temperature_in", "thetao", "votemper", "T_mean",
-          "theta_ocean", "temperature"),
-    "S": ("salinity_in", "so", "vosaline", "S_mean", "salinity_ocean", "salinity"),
-    "u_mag": ("u_mag", "speed", "current_speed", "uo"),
-    "ice_draft": ("corrected_isfdraft", "ice_draft", "isfdraft", "draft",
-                  "corrected_isf_draft"),
-    "bed_depth": ("bathy_metry", "bedrock_topography", "bed", "bathymetry",
-                  "corrected_bathy"),
+    # From interim/T_S_PROF/.../T_S_2D_fields_isf_draft_*.nc
+    "T": ("theta_in", "temperature_in", "thetao", "votemper", "theta_ocean"),
+    "S": ("salinity_in", "so", "vosaline", "salinity_ocean", "salinity"),
+    "thermal_driving": ("thermal_forcing", "thermal_driving"),
+    "freezing_T": ("freezing_T", "T_freeze"),
+    "depth_of_int": ("depth_of_int", "depth_of_integration"),
+    # From interim/.../corrected_draft_bathy_isf.nc  (1334x1334 grid)
+    "ice_draft": ("corrected_isfdraft", "ice_draft", "isfdraft", "draft"),
+    "bed_depth": ("corrected_isf_bathy", "bathy_metry", "bedrock_topography",
+                  "bed", "bathymetry"),
     "water_column": ("water_column_thickness", "thickness_cavity", "wct"),
-    "slope_ice": ("slope_isf_x", "alpha", "ice_slope"),
-    "dist_gl": ("dist_from_grounding_line", "dGL", "distance_gl"),
-    "dist_front": ("dist_from_front", "dIF", "distance_front"),
-    "isf_mask": ("ISF_mask", "mask_isf", "isf_mask", "mask"),
+    # From interim/ANTARCTICA_IS_MASKS/.../nemo_5km_slope_info_*.nc
+    "slope_ice_lon": ("slope_ice_lon",),
+    "slope_ice_lat": ("slope_ice_lat",),
+    "slope_bed_lon": ("slope_bed_lon",),
+    "slope_bed_lat": ("slope_bed_lat",),
+    "entry_depth": ("entry_depth_max",),
+    # From interim/ANTARCTICA_IS_MASKS/.../nemo_5km_isf_masks_*.nc
+    "u_mag": ("u_mag", "speed", "current_speed", "uo"),
+    "dist_gl": ("dGL", "dist_from_grounding_line", "distance_gl"),
+    "dist_front": ("dIF", "dist_from_front", "distance_front"),
+    "isf_mask": ("ISF_mask", "mask_isf", "isf_mask"),
+    "ground_mask": ("ground_mask",),
+    "front_mask": ("IF_mask",),
+    "gl_mask": ("GL_mask",),
+    # Per-shelf metadata, dimension Nisf
+    "isf_name": ("isf_name",),
+    "isf_melt_obs": ("isf_melt",),
+    "isf_area": ("isf_area_rignot", "isf_area_here"),
+    "gl_flux": ("GL_flux",),
     "latitude": ("latitude", "lat", "nav_lat"),
     "longitude": ("longitude", "lon", "nav_lon"),
     "x": ("x", "X", "nav_x"),
@@ -169,6 +193,77 @@ def available_simulations(root: Path | None = None,
     if not base.is_dir():
         return []
     return sorted(p.name for p in base.iterdir() if p.is_dir())
+
+
+def find_geometry(simulation: str, root: Path | None = None) -> Path | None:
+    """Locate the corrected draft and bathymetry file for a simulation.
+
+    These live under the 2022 release in a per-simulation directory named after
+    the full NEMO configuration, and on a different grid from everything else
+    (1334x1334 rather than 1200x1200), so they must be regridded onto the mask
+    grid before the fields can be combined.
+    """
+    root = Path(root) if root is not None else RAW_DIR
+    base = root / "burgard2022" / "interim"
+    if not base.is_dir():
+        return None
+    for directory in sorted(base.glob(f"NEMO_*{simulation}*")):
+        candidate = directory / "corrected_draft_bathy_isf.nc"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def find_melt(simulation: str, root: Path | None = None) -> Path | None:
+    """Locate the 2-D reference melt field for a simulation."""
+    root = Path(root) if root is not None else RAW_DIR
+    for base, pattern in (
+        (root / "burgard2022" / "processed" / "MELT_RATE",
+         f"nemo_5km_{simulation}/melt_rates_2D_*_timmean_oneFRIS.nc"),
+        (root / "burgard2023" / "processed" / "MELT_RATE",
+         f"{simulation}/melt_rates_2D_*.nc"),
+    ):
+        if base.is_dir():
+            hits = sorted(base.glob(pattern))
+            if hits:
+                return hits[0]
+    return None
+
+
+def shelf_index(masks_path: Path) -> dict[str, int]:
+    """Map ice-shelf name to its integer id in ``ISF_mask``.
+
+    The mask file carries a 136-element table of shelf names and ids; matching
+    on name rather than on a hard-coded id is necessary because the numbering
+    is not stable between the two releases.
+    """
+    with open_dataset(masks_path) as ds:
+        names = ds[resolve(ds, "isf_name")].values
+        ids = ds["Nisf"].values
+    out: dict[str, int] = {}
+    for name, ident in zip(names, ids):
+        label = (name.decode() if isinstance(name, bytes) else str(name)).strip()
+        if label and label.lower() != "nan":
+            out[label] = int(ident)
+    return out
+
+
+def match_shelf(index: dict[str, int], shelf) -> int | None:
+    """Resolve one of our :class:`IceShelf` entries against the archive's names."""
+    wanted = [shelf.name] + list(getattr(shelf, "aliases", ()))
+    normalised = {k.lower().replace("_", " ").replace("-", " "): v
+                  for k, v in index.items()}
+    for candidate in wanted:
+        key = candidate.lower().replace("_", " ").replace("-", " ")
+        if key in normalised:
+            return normalised[key]
+    # Fall back to a containment match, which catches e.g. "Ross_West".
+    for candidate in wanted:
+        key = candidate.lower().replace("_", " ").replace("-", " ")
+        for name, ident in normalised.items():
+            if key in name or name in key:
+                return ident
+    return None
 
 
 # --------------------------------------------------------------------------- #
