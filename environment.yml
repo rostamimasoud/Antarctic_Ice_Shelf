@@ -1,7 +1,5 @@
 name: aisgnn
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
 dependencies:
   - python=3.11
@@ -20,10 +18,6 @@ dependencies:
   - bottleneck
   - pyproj
   - cartopy
-  # --- deep learning ------------------------------------------------------
-  - pytorch>=2.2
-  - pytorch-cuda=12.1
-  - torchvision
   # --- plotting -----------------------------------------------------------
   - matplotlib>=3.8
   - seaborn
@@ -32,9 +26,13 @@ dependencies:
   - ruff
   - tqdm
   - pyyaml
-  - jupyterlab
   - pip:
-      # Installed via pip: the conda builds lag the PyTorch version.
+      # Torch and PyTorch Geometric come from pip rather than conda so that the
+      # CUDA build is pinned explicitly and the two stay version-matched; the
+      # conda pytorch channel routinely lags and silently resolves to a CPU
+      # build, which fails only once a job reaches a GPU node.
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.3.1
       - torch-geometric>=2.5
       - shap>=0.44
       - captum>=0.7

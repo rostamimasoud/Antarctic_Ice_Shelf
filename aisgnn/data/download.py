@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ..config import RAW_DIR, RECORDS, ZenodoRecord
 
@@ -132,33 +132,86 @@ def md5sum(path: Path) -> str:
 # --------------------------------------------------------------------------- #
 
 def download_file(url: str, dest: Path, size: int | None = None,
-                  checksum: str | None = None) -> Path:
+                  checksum: str | None = None, attempts: int = 3) -> Path:
     """Download ``url`` to ``dest``, resuming a partial transfer if present.
 
-    ``checksum`` is the Zenodo ``md5:...`` string; when supplied the finished
-    file is verified and re-downloaded once on mismatch.
+    A completed file is verified against the Zenodo MD5 and re-fetched from
+    scratch on mismatch: transient corruption over a multi-gigabyte transfer is
+    common enough that failing the whole record for it wastes hours.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if _already_valid(dest, size, checksum):
+        return dest
+
+    last_error = ""
+    for attempt in range(1, attempts + 1):
+        _fetch_once(url, dest, size)
+
+        if checksum is None:
+            return dest
+
+        got = md5sum(dest)
+        want = checksum.split(":")[-1]
+        if got == want:
+            _log(f"  checksum ok: {dest.name}")
+            return dest
+
+        last_error = f"{got} != {want}"
+        _log(f"  checksum mismatch for {dest.name} ({last_error}); "
+             f"attempt {attempt}/{attempts}, refetching in full")
+        dest.unlink(missing_ok=True)
+
+    raise RuntimeError(f"checksum never matched for {dest.name} after "
+                       f"{attempts} attempts: {last_error}")
+
+
+def _already_valid(dest: Path, size: int | None, checksum: str | None) -> bool:
+    """True when ``dest`` is present and verifiably complete."""
+    if not dest.exists():
+        return False
+    if size is not None and dest.stat().st_size != size:
+        return False
+    if checksum is None:
+        _log(f"  exists, skipping: {dest.name}")
+        return True
+    if md5sum(dest) == checksum.split(":")[-1]:
+        _log(f"  verified, skipping: {dest.name}")
+        return True
+    _log(f"  checksum mismatch, refetching: {dest.name}")
+    dest.unlink(missing_ok=True)
+    return False
+
+
+def _fetch_once(url: str, dest: Path, size: int | None) -> None:
+    """Transfer ``url`` into ``dest``, resuming from a usable partial file."""
     part = dest.with_suffix(dest.suffix + ".part")
 
-    if dest.exists() and (size is None or dest.stat().st_size == size):
-        if checksum is None:
-            _log(f"  exists, skipping: {dest.name}")
-            return dest
-        if md5sum(dest) == checksum.split(":")[-1]:
-            _log(f"  verified, skipping: {dest.name}")
-            return dest
-        _log(f"  checksum mismatch, refetching: {dest.name}")
-        dest.unlink()
+    # A partial file larger than the target means an earlier resume appended to
+    # a response that ignored the Range header; start it again rather than
+    # promoting a file that can only fail its checksum.
+    if part.exists() and size is not None and part.stat().st_size > size:
+        _log(f"  discarding oversized partial: {part.name}")
+        part.unlink()
 
     for attempt in range(1, MAX_RETRIES + 1):
         offset = part.stat().st_size if part.exists() else 0
+        if size is not None and offset == size:
+            break
         headers = {"Range": f"bytes={offset}-"} if offset else {}
         try:
             with _open(url, headers) as resp, part.open("ab" if offset else "wb") as out:
+                # A server that ignores Range replies 200 with the whole body;
+                # appending it to the existing bytes would corrupt the file.
+                if offset and resp.status != 206:
+                    out.close()
+                    part.unlink(missing_ok=True)
+                    _log(f"  range not honoured for {dest.name}; restarting")
+                    continue
+
                 total = offset + int(resp.headers.get("Content-Length", 0) or 0)
                 done = offset
-                bar = _Progress(dest.name, total, offset)
+                bar = _Progress(dest.name, total or (size or 0), offset)
                 while True:
                     block = resp.read(CHUNK)
                     if not block:
@@ -175,25 +228,28 @@ def download_file(url: str, dest: Path, size: int | None = None,
     else:
         raise RuntimeError(f"failed to download {url} after {MAX_RETRIES} attempts")
 
-    # Tolerate the case where a concurrent or interrupted run already promoted
-    # the partial file: the checksum below is what actually decides validity.
     if part.exists():
         part.replace(dest)
     elif not dest.exists():
         raise RuntimeError(f"neither {part.name} nor {dest.name} present after download")
 
-    if checksum is not None:
-        got = md5sum(dest)
-        want = checksum.split(":")[-1]
-        if got != want:
-            dest.unlink(missing_ok=True)
-            raise RuntimeError(
-                f"checksum mismatch for {dest.name}: {got} != {want}; "
-                f"the corrupt file has been removed, re-run to fetch it again"
-            )
-        _log(f"  checksum ok: {dest.name}")
+    if size is not None and dest.stat().st_size != size:
+        raise RuntimeError(f"{dest.name}: got {dest.stat().st_size} bytes, expected {size}")
 
-    return dest
+
+def _safe_member_path(member: str) -> Path | None:
+    """Normalise an archive member to a path that cannot escape the target.
+
+    Several of these archives were zipped from a nested working directory and
+    legitimately carry ``../../interim/...`` prefixes.  Refusing them outright
+    would reject real data, so the leading parent references and any absolute
+    prefix are stripped instead; the remainder is guaranteed to stay inside the
+    extraction directory.  Returns ``None`` for members that normalise away to
+    nothing.
+    """
+    parts = [p for p in PurePosixPath(member).parts
+             if p not in ("..", ".", "/") and not p.endswith(":")]
+    return Path(*parts) if parts else None
 
 
 def extract_archive(archive: Path, target: Path, cleanup: bool = False) -> Path:
@@ -205,13 +261,19 @@ def extract_archive(archive: Path, target: Path, cleanup: bool = False) -> Path:
 
     target.mkdir(parents=True, exist_ok=True)
     _log(f"  extracting {archive.name} -> {target}")
+
     with zipfile.ZipFile(archive) as zf:
-        for member in zf.namelist():
-            # Guard against path traversal in untrusted archives.
-            resolved = (target / member).resolve()
-            if not str(resolved).startswith(str(target.resolve())):
-                raise RuntimeError(f"unsafe path in archive: {member}")
-        zf.extractall(target)
+        for info in zf.infolist():
+            rel = _safe_member_path(info.filename)
+            if rel is None:
+                continue
+            dest = target / rel
+            if info.is_dir():
+                dest.mkdir(parents=True, exist_ok=True)
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, dest.open("wb") as out:
+                shutil.copyfileobj(src, out, CHUNK)
 
     marker.touch()
     if cleanup:
