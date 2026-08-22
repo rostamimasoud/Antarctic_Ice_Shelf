@@ -111,27 +111,38 @@ def run_continuation(cavities: list[str], params: dict[str, float],
 # --------------------------------------------------------------------------- #
 
 def run_rtipping(cavities: list[str], params: dict[str, float],
-                 continuation: dict[str, dict]) -> dict[str, dict]:
+                 continuation: dict[str, dict],
+                 parameter: str = "sigma") -> dict[str, dict]:
     """Locate the critical forcing rate for cavities that have a B-tipping fold.
 
-    Targets are placed at fractions of the way from the present-day value to the
-    quasi-static threshold, so any tipping that occurs is unambiguously
-    rate-induced: the forcing never reaches the bifurcation.
+    The ramp is applied to the sea-ice formation rate, because that is the
+    parameter that actually carries the saddle-node: continuing in CDW
+    temperature produces no fold for the cold cavities, so a temperature ramp has
+    no quasi-static threshold to undershoot and rate-induced tipping is not
+    defined for it.
+
+    A cold cavity tips when sea-ice formation *falls* through the lower fold, so
+    the ramp runs downward and the target is placed at a fraction of the way from
+    the present-day value towards the threshold.  Any tipping that occurs is then
+    unambiguously rate-induced: the forcing never reaches the bifurcation.
     """
     out: dict[str, dict] = {}
 
     for cav in cavities:
         rec = continuation.get(cav, {})
-        if not rec.get("ok"):
+        if not rec.get("ok") or OBSERVATIONS[cav].regime != "cold":
             continue
 
         folds = [f for f in rec["folds"] if f["direction"] == "cold_to_warm"]
-        if not folds or OBSERVATIONS[cav].regime != "cold":
+        if not folds:
             continue
 
         p0 = rec["present_day"]
-        p_bif = min(f["p"] for f in folds)
-        if p_bif <= p0:
+        # The relevant threshold is the cold->warm fold the present state would
+        # reach first; for a downward ramp that is the nearest one below p0.
+        below = [f["p"] for f in folds if f["p"] < p0]
+        p_bif = max(below) if below else min(f["p"] for f in folds)
+        if p_bif == p0:
             continue
 
         obs = OBSERVATIONS[cav]
@@ -140,23 +151,33 @@ def run_rtipping(cavities: list[str], params: dict[str, float],
         results = []
         for frac in (0.7, 0.8, 0.9, 0.95):
             target = p0 + frac * (p_bif - p0)
-            res = critical_rate(base, "T_cdw", p0, target,
-                                tau_bounds=(5.0, 5000.0), p_bifurcation=p_bif)
+            try:
+                res = critical_rate(base, parameter, p0, target,
+                                    tau_bounds=(5.0, 5000.0), p_bifurcation=p_bif)
+            except (RuntimeError, ValueError) as exc:
+                log(f"  {cav:16s} target={target:6.2f}: {exc}")
+                res = None
+
             if res is None:
                 results.append({"fraction": frac, "p_target": target,
                                 "tau_critical": None})
                 continue
+
             results.append({
                 "fraction": frac, "p_target": target,
                 "tau_critical": res.tau_critical,
                 "rate_critical": res.rate_critical,
                 "threshold_reduction": res.threshold_reduction,
             })
-            log(f"  {cav:16s} target={target:5.2f} degC "
-                f"({100 * frac:.0f}% of B-threshold {p_bif:.2f})  "
+            log(f"  {cav:16s} target={target:6.2f} m/yr "
+                f"({100 * frac:.0f}% of the way to the B-threshold {p_bif:.2f})  "
                 f"tips if ramped faster than {res.tau_critical:7.1f} yr")
 
-        out[cav] = {"p_present": p0, "p_bifurcation": p_bif, "targets": results}
+        if any(r.get("tau_critical") for r in results):
+            out[cav] = {"parameter": parameter, "p_present": p0,
+                        "p_bifurcation": p_bif, "targets": results}
+        else:
+            log(f"  {cav:16s} no rate-induced tipping within the rate bracket")
 
     return out
 
@@ -273,7 +294,7 @@ def make_figure(cont_T: dict, cont_sigma: dict, rtip: dict, path: Path) -> list[
 
     if plotted:
         ax.set_yscale("log")
-        ax.set_xlabel("Target CDW temperature ($^\\circ$C)")
+        ax.set_xlabel("Target sea-ice formation rate $\\Sigma$ (m yr$^{-1}$)")
         ax.set_ylabel("Critical ramp duration (yr)")
         ax.legend(loc="best", fontsize=6.0)
         st.soften_grid(ax)
@@ -328,7 +349,7 @@ def main() -> int:
     rtip: dict[str, dict] = {}
     if not args.skip_rtipping:
         log("rate-induced tipping")
-        rtip = run_rtipping(cavities, cal.params, cont_T)
+        rtip = run_rtipping(cavities, cal.params, cont_sigma, parameter="sigma")
 
     (outdir / "continuation_T_cdw.json").write_text(json.dumps(cont_T))
     (outdir / "continuation_sigma.json").write_text(json.dumps(cont_sigma))

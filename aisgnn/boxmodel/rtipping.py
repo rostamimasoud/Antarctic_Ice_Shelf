@@ -29,6 +29,17 @@ from .cavity import BoxParams, CavityBoxModel
 #: this value, i.e. the cavity is no longer ventilated by dense shelf water.
 CHI_TIPPED = 0.5
 
+#: Minimum years integrated after the ramp ends, regardless of ramp length.
+#:
+#: This is not a safety margin but a correctness requirement.  The cavity and
+#: coastal boxes equilibrate over centuries to millennia -- the spin-ups used to
+#: locate attractors run for 8000 years -- so relaxing for a small multiple of a
+#: short ramp leaves the system mid-transient.  It then still looks
+#: DSW-ventilated whatever the forcing has done, and every ramp is scored as
+#: not tipped, producing a clean but entirely spurious "no rate-induced tipping"
+#: result.
+MIN_RELAX_YEARS = 5000.0
+
 
 @dataclass
 class RampResult:
@@ -91,12 +102,12 @@ def run_ramp(base: BoxParams, parameter: str, p_start: float, p_target: float,
     Parameters
     ----------
     relax_years
-        Time integrated *after* the ramp ends, during which the forcing is held
-        constant.  Defaults to twice the ramp length, which is enough for the
-        cavity to commit to a branch.
+        Time integrated *after* the ramp ends with the forcing held constant.
+        Defaults to twice the ramp length but never less than
+        :data:`MIN_RELAX_YEARS`, so the cavity has time to commit to a branch.
     """
     if relax_years is None:
-        relax_years = 2.0 * tau_years
+        relax_years = max(2.0 * tau_years, MIN_RELAX_YEARS)
 
     model = CavityBoxModel(base.with_control(**{parameter: p_start}))
     if x0 is None:
