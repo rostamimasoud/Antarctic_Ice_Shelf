@@ -146,7 +146,20 @@ def download_file(url: str, dest: Path, size: int | None = None,
 
     last_error = ""
     for attempt in range(1, attempts + 1):
-        _fetch_once(url, dest, size)
+        # Resume only on the first attempt.  Every observed failure mode here --
+        # a partial file that ends up larger than the target, or one that
+        # vanishes between transfer and rename -- comes from appending to a
+        # response that did not honour the Range request, so a retry that
+        # resumed again would reproduce it exactly.
+        try:
+            _fetch_once(url, dest, size, resume=(attempt == 1))
+        except RuntimeError as exc:
+            last_error = str(exc)
+            _log(f"  {dest.name}: {exc}; attempt {attempt}/{attempts}, "
+                 f"refetching from scratch")
+            dest.unlink(missing_ok=True)
+            dest.with_suffix(dest.suffix + ".part").unlink(missing_ok=True)
+            continue
 
         if checksum is None:
             return dest
@@ -157,12 +170,12 @@ def download_file(url: str, dest: Path, size: int | None = None,
             _log(f"  checksum ok: {dest.name}")
             return dest
 
-        last_error = f"{got} != {want}"
-        _log(f"  checksum mismatch for {dest.name} ({last_error}); "
+        last_error = f"checksum {got} != {want}"
+        _log(f"  checksum mismatch for {dest.name}; "
              f"attempt {attempt}/{attempts}, refetching in full")
         dest.unlink(missing_ok=True)
 
-    raise RuntimeError(f"checksum never matched for {dest.name} after "
+    raise RuntimeError(f"could not fetch {dest.name} after "
                        f"{attempts} attempts: {last_error}")
 
 
@@ -183,16 +196,21 @@ def _already_valid(dest: Path, size: int | None, checksum: str | None) -> bool:
     return False
 
 
-def _fetch_once(url: str, dest: Path, size: int | None) -> None:
-    """Transfer ``url`` into ``dest``, resuming from a usable partial file."""
+def _fetch_once(url: str, dest: Path, size: int | None,
+                resume: bool = True) -> None:
+    """Transfer ``url`` into ``dest``, optionally resuming a partial file."""
     part = dest.with_suffix(dest.suffix + ".part")
 
-    # A partial file larger than the target means an earlier resume appended to
-    # a response that ignored the Range header; start it again rather than
-    # promoting a file that can only fail its checksum.
-    if part.exists() and size is not None and part.stat().st_size > size:
-        _log(f"  discarding oversized partial: {part.name}")
-        part.unlink()
+    if not resume:
+        part.unlink(missing_ok=True)
+
+    # A partial file at or beyond the target size means an earlier resume
+    # appended to a response that ignored the Range header; start again rather
+    # than promoting a file that can only fail its checksum.
+    if part.exists() and size is not None and part.stat().st_size >= size:
+        if part.stat().st_size > size:
+            _log(f"  discarding oversized partial: {part.name}")
+            part.unlink()
 
     for attempt in range(1, MAX_RETRIES + 1):
         offset = part.stat().st_size if part.exists() else 0
