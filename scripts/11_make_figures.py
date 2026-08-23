@@ -172,20 +172,40 @@ def figure_connectivity(conn: list, path: Path) -> list[str]:
         arch = graph_arch[0]
         by_shelf = defaultdict(dict)
         for r in conn:
-            if r["arch"] == arch and r["length_scale_km"]:
-                by_shelf[r["shelf"]][r["simulation"]] = r["length_scale_km"]
+            if r["arch"] != arch:
+                continue
+            # A shelf whose decay is unresolved contributes an upper bound, drawn
+            # open with an arrow, never a filled bar: plotting a bound as though
+            # it were a fitted value is the error this panel exists to avoid.
+            by_shelf[r["shelf"]][r["simulation"]] = (
+                r.get("length_scale_km"), r.get("upper_bound_km"),
+                bool(r.get("resolved")))
         shelves = sorted(by_shelf)
         y = np.arange(len(shelves))
         for j, sim in enumerate(("SMITH_bf663", "SMITH_bi646")):
-            vals = [by_shelf[s].get(sim, np.nan) for s in shelves]
-            ax.barh(y + (j - 0.5) * 0.38, vals, height=0.34,
-                    color=st.CATEGORICAL[j],
-                    label=SCENARIO_LABEL.get(sim, sim), zorder=3)
+            off = (j - 0.5) * 0.38
+            for i, shelf in enumerate(shelves):
+                entry = by_shelf[shelf].get(sim)
+                if entry is None:
+                    continue
+                L, bound, resolved = entry
+                if resolved and L:
+                    ax.barh(i + off, L, height=0.34, color=st.CATEGORICAL[j],
+                            zorder=3)
+                elif bound:
+                    ax.barh(i + off, bound, height=0.34, facecolor="none",
+                            edgecolor=st.CATEGORICAL[j], lw=0.8, zorder=3,
+                            hatch="///")
         ax.set_yticks(y)
         ax.set_yticklabels(shelves, fontsize=6.0)
         ax.set_xlabel("Connectivity length scale (km)")
         ax.set_title(f"{ARCH_LABEL[arch]}", fontsize=6.5)
-        ax.legend(fontsize=5.8)
+        handles = [Line2D([], [], color=st.CATEGORICAL[j], lw=4,
+                          label=SCENARIO_LABEL.get(sim, sim))
+                   for j, sim in enumerate(("SMITH_bf663", "SMITH_bi646"))]
+        handles.append(Line2D([], [], color=st.INK["secondary"], lw=0.8,
+                              marker="", label="hatched = upper bound only"))
+        ax.legend(handles=handles, fontsize=5.4)
         st.soften_grid(ax, axis="x")
     st.panel_label(ax, "b")
 

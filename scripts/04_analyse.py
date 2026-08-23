@@ -142,14 +142,22 @@ def run_connectivity(models: dict, graphs: dict, n_sources: int) -> list[dict]:
                 "arch": arch, "shelf": shelf, "simulation": sim,
                 "length_scale_km": (float(ls.length_scale / 1e3)
                                     if np.isfinite(ls.length_scale) else None),
+                "upper_bound_km": (float(ls.upper_bound / 1e3)
+                                   if np.isfinite(ls.upper_bound) else None),
+                "resolved": bool(ls.resolved),
+                "n_bins_used": int(ls.n_bins_used),
                 "r_squared": float(ls.r_squared) if np.isfinite(ls.r_squared) else None,
                 "max_distance_km": float(ls.max_distance / 1e3),
                 "distances_km": (ls.distances / 1e3).tolist(),
                 "influence": np.nan_to_num(ls.influence, nan=0.0).tolist(),
                 "note": ls.note,
             })
-            log(f"  {arch:5s} {shelf:16s} {sim:12s} "
-                f"L = {ls.length_scale / 1e3 if np.isfinite(ls.length_scale) else float('nan'):7.1f} km")
+            if ls.resolved:
+                log(f"  {arch:5s} {shelf:16s} {sim:12s} L = {ls.length_scale / 1e3:7.1f} km "
+                    f"(R2 {ls.r_squared:.2f}, {ls.n_bins_used} bins)")
+            else:
+                log(f"  {arch:5s} {shelf:16s} {sim:12s} L unresolved, "
+                    f"< {ls.upper_bound / 1e3:.1f} km -- {ls.note}")
     return out
 
 

@@ -30,40 +30,95 @@ import numpy as np
 import torch
 
 
+#: Influence below this fraction of the peak is treated as numerically zero.
+#:
+#: Perturbing one node changes distant predictions by a residue of order 1e-4 of
+#: the near-field response, and that residue is flat with distance.  Including it
+#: in the exponential fit is not a small error: the fit then sees a steep drop
+#: followed by a long flat tail and returns an e-folding scale several times the
+#: true one.
+NOISE_FLOOR = 1.0e-2
+
+#: A fit explaining less than this fraction of the variance is not reported as a
+#: length scale, only as an upper bound.
+MIN_R_SQUARED = 0.5
+
+#: Fewer usable bins than this cannot constrain an exponential.
+MIN_BINS = 4
+
+
 @dataclass
 class LengthScale:
-    """Distance-resolved influence and the scale fitted to it."""
+    """Distance-resolved influence and the scale fitted to it.
+
+    ``length_scale`` is NaN when the decay is unresolved -- either it happens
+    inside the first bin, or the fit is too poor to trust.  ``upper_bound`` is
+    then the distance beyond which influence has already fallen to the noise
+    floor, which is the only defensible statement in that case.
+    """
 
     shelf: str
     method: str
     distances: np.ndarray          # bin centres, m
     influence: np.ndarray          # mean influence in each bin, normalised
-    length_scale: float            # e-folding distance, m
+    length_scale: float            # e-folding distance, m; NaN if unresolved
     r_squared: float               # quality of the exponential fit
     max_distance: float            # largest separation sampled
     note: str = ""
+    upper_bound: float = float("nan")   # m
+    n_bins_used: int = 0
+
+    @property
+    def resolved(self) -> bool:
+        return bool(np.isfinite(self.length_scale) and self.length_scale > 0)
 
 
 def _exponential_fit(distance: np.ndarray, influence: np.ndarray
-                     ) -> tuple[float, float]:
-    """Fit ``influence ~ exp(-d / L)`` by least squares in log space.
+                     ) -> tuple[float, float, int]:
+    """Fit ``influence ~ exp(-d / L)`` in log space, above the noise floor.
 
-    Returns ``(L, r_squared)``, with ``L`` in the units of ``distance``.
+    Returns ``(L, r_squared, n_bins_used)``.  Bins at or below
+    :data:`NOISE_FLOOR` times the peak are excluded, because they carry no
+    signal and dominate the regression if kept.
     """
-    good = np.isfinite(influence) & (influence > 0) & np.isfinite(distance)
-    if good.sum() < 3:
-        return float("nan"), float("nan")
+    finite = np.isfinite(influence) & np.isfinite(distance) & (influence > 0)
+    if not finite.any():
+        return float("nan"), float("nan"), 0
+
+    peak = float(np.nanmax(influence[finite]))
+    good = finite & (influence > NOISE_FLOOR * peak)
+    if good.sum() < MIN_BINS:
+        return float("nan"), float("nan"), int(good.sum())
 
     d = distance[good]
     y = np.log(influence[good])
     slope, intercept = np.polyfit(d, y, 1)
     if slope >= 0:
-        return float("inf"), 0.0
+        return float("nan"), 0.0, int(good.sum())
 
     pred = slope * d + intercept
     ss_res = float(np.sum((y - pred) ** 2))
     ss_tot = float(np.sum((y - y.mean()) ** 2))
-    return float(-1.0 / slope), (1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan)
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+    return float(-1.0 / slope), r2, int(good.sum())
+
+
+def _log_bins(distance: np.ndarray, n_bins: int) -> np.ndarray:
+    """Logarithmically spaced bin edges spanning the sampled separations.
+
+    Linear bins are unusable across this range of cavity sizes: Filchner-Ronne
+    spans 700 km, so twelve linear bins are 60 km wide and the entire decay falls
+    inside the first one.  Log spacing resolves the near field for large and
+    small cavities alike.
+    """
+    positive = distance[distance > 0]
+    if positive.size == 0:
+        return np.linspace(0.0, 1.0, n_bins + 1)
+    lo = max(float(np.percentile(positive, 1)), 1.0)
+    hi = float(np.percentile(positive, 95))
+    if hi <= lo:
+        hi = lo * 10.0
+    return np.geomspace(lo, hi, n_bins + 1)
 
 
 # --------------------------------------------------------------------------- #
@@ -105,17 +160,18 @@ def attention_length_scale(model, data, n_bins: int = 12) -> LengthScale:
                            np.empty(0), np.empty(0), np.nan, np.nan, 0.0,
                            "no non-self edges")
 
-    edges = np.linspace(0.0, d.max(), n_bins + 1)
-    centres = 0.5 * (edges[:-1] + edges[1:])
+    edges = _log_bins(d, n_bins)
+    centres = np.sqrt(edges[:-1] * edges[1:])
     influence = np.array([w[(d >= lo) & (d < hi)].mean() if ((d >= lo) & (d < hi)).any()
                           else np.nan for lo, hi in zip(edges[:-1], edges[1:])])
     if np.nanmax(influence) > 0:
         influence = influence / np.nanmax(influence)
 
-    L, r2 = _exponential_fit(centres, influence)
+    L, r2, n_used = _exponential_fit(centres, influence)
     return LengthScale(getattr(data, "shelf", ""), "attention", centres, influence,
                        L, r2, float(d.max()),
-                       "single-hop attention; understates the multi-layer receptive field")
+                       "single-hop attention; understates the multi-layer receptive field",
+                       n_bins_used=n_used)
 
 
 # --------------------------------------------------------------------------- #
@@ -164,26 +220,42 @@ def sensitivity_length_scale(model, data, feature: str = "thermal_driving",
     d = np.concatenate(dist_all)
     r = np.concatenate(resp_all)
 
-    edges = np.linspace(0.0, np.percentile(d, 95), n_bins + 1)
-    centres = 0.5 * (edges[:-1] + edges[1:])
+    edges = _log_bins(d, n_bins)
+    centres = np.sqrt(edges[:-1] * edges[1:])          # geometric bin centres
     influence = np.array([r[(d >= lo) & (d < hi)].mean() if ((d >= lo) & (d < hi)).any()
                           else np.nan for lo, hi in zip(edges[:-1], edges[1:])])
 
+    shelf = getattr(data, "shelf", "")
     peak = np.nanmax(influence) if np.isfinite(influence).any() else 0.0
-    if peak > 0:
-        influence = influence / peak
-    else:
+    if not peak > 0:
         # A model with no spatial coupling responds only at the perturbed node,
         # which is excluded, so every bin is zero.  That is the correct answer
         # for the MLP baseline and must be reported as zero, not as a failure.
-        return LengthScale(getattr(data, "shelf", ""), "sensitivity", centres,
-                           influence, 0.0, np.nan, float(d.max()),
-                           "no downstream response: model has no spatial coupling")
+        return LengthScale(shelf, "sensitivity", centres, influence, 0.0, np.nan,
+                           float(d.max()),
+                           "no downstream response: model has no spatial coupling",
+                           upper_bound=0.0, n_bins_used=0)
 
-    L, r2 = _exponential_fit(centres, influence)
-    return LengthScale(getattr(data, "shelf", ""), "sensitivity", centres, influence,
-                       L, r2, float(d.max()),
-                       f"{len(sources)} source nodes, delta={delta}")
+    influence = influence / peak
+    L, r2, n_used = _exponential_fit(centres, influence)
+
+    # Distance beyond which the response has already reached the noise floor.
+    above = np.flatnonzero(np.nan_to_num(influence) > NOISE_FLOOR)
+    upper = float(centres[above[-1]]) if above.size else float(centres[0])
+
+    if not np.isfinite(L) or not np.isfinite(r2) or r2 < MIN_R_SQUARED:
+        reason = ("decay unresolved: falls to the noise floor within the first bins"
+                  if n_used < MIN_BINS else
+                  f"exponential fit poor (R2 = {r2:.2f}); reporting an upper bound only")
+        return LengthScale(shelf, "sensitivity", centres, influence, float("nan"),
+                           r2, float(d.max()), reason,
+                           upper_bound=upper, n_bins_used=n_used)
+
+    return LengthScale(shelf, "sensitivity", centres, influence, L, r2,
+                       float(d.max()),
+                       f"{len(sources)} source nodes, delta={delta}, "
+                       f"{n_used} bins above the noise floor",
+                       upper_bound=upper, n_bins_used=n_used)
 
 
 def compare_scales(model, data, **kwargs) -> dict:
