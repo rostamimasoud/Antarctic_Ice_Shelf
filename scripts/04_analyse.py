@@ -94,14 +94,29 @@ def collate_skill(train_dir: Path) -> dict:
         r2 = np.array([g["test"]["r2"] for g in group])
         base = np.array([g["test"].get("rmse_baseline_shelfmean", np.nan)
                          for g in group])
+
+        # Skill is formed per seed and only then averaged.  Averaging RMSE and
+        # averaging R2 separately gives contradictory answers here, because each
+        # seed holds out a different cavity and those differ by an order of
+        # magnitude in melt variance: a single bad seed can drag the mean R2
+        # negative while the mean RMSE still sits below the mean baseline.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            skill = np.where(base > 0, 1.0 - rmse / base, np.nan)
+        finite = skill[np.isfinite(skill)]
+
         summary[f"{arch}_{split}"] = {
             "arch": arch, "split": split, "n_seeds": len(group),
-            "rmse_mean": float(rmse.mean()), "rmse_std": float(rmse.std(ddof=1))
-            if len(group) > 1 else 0.0,
+            "rmse_mean": float(rmse.mean()),
+            "rmse_std": float(rmse.std(ddof=1)) if len(group) > 1 else 0.0,
             "r2_mean": float(r2.mean()),
             "r2_std": float(r2.std(ddof=1)) if len(group) > 1 else 0.0,
+            "r2_median": float(np.median(r2)),
             "baseline_rmse": float(np.nanmean(base)),
-            "beats_baseline": bool(rmse.mean() < np.nanmean(base)),
+            "skill_median": float(np.median(finite)) if finite.size else float("nan"),
+            "skill_iqr": (float(np.percentile(finite, 75) - np.percentile(finite, 25))
+                          if finite.size else float("nan")),
+            "n_seeds_beating": int((finite > 0).sum()),
+            "beats_baseline": bool(finite.size and np.median(finite) > 0),
             "epochs_mean": float(np.mean([g["epochs_run"] for g in group])),
             "seconds_mean": float(np.mean([g["seconds"] for g in group])),
         }
@@ -306,9 +321,10 @@ def main() -> int:
     (outdir / "skill.json").write_text(json.dumps(skill, indent=2))
     log(f"  {skill['n_runs']} runs, {len(skill['by_arch_split'])} arch/split groups")
     for key, s in sorted(skill["by_arch_split"].items()):
-        log(f"    {key:18s} RMSE {s['rmse_mean']:.4f}+-{s['rmse_std']:.4f}  "
-            f"R2 {s['r2_mean']:+.3f}  baseline {s['baseline_rmse']:.4f}  "
-            f"beats={s['beats_baseline']}")
+        log(f"    {key:18s} RMSE {s['rmse_mean']:.3f}+-{s['rmse_std']:.3f}  "
+            f"baseline {s['baseline_rmse']:.3f}  "
+            f"skill {s['skill_median']:+.3f} (IQR {s['skill_iqr']:.3f})  "
+            f"{s['n_seeds_beating']}/{s['n_seeds']} seeds beat it")
 
     if args.skill_only:
         return 0

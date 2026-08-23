@@ -109,21 +109,24 @@ def figure_skill(skill: dict, path: Path) -> list[str]:
     # (b) skill relative to the baseline: positive means genuinely spatial skill.
     ax = axes[1]
     for k, arch in enumerate(ARCH_ORDER):
-        xs, ys = [], []
+        xs, ys, es = [], [], []
         for i, split in enumerate(splits):
             rec = rows.get(f"{arch}_{split}")
-            if rec is None or not np.isfinite(rec["baseline_rmse"]):
+            if rec is None or not np.isfinite(rec.get("skill_median", np.nan)):
                 continue
             xs.append(i + (k - 1.5) * width)
-            ys.append(1.0 - rec["rmse_mean"] / rec["baseline_rmse"])
+            ys.append(rec["skill_median"])
+            es.append(rec.get("skill_iqr", 0.0) / 2.0)
         if xs:
-            ax.bar(xs, ys, width=width * 0.9, color=colours[arch], zorder=3)
+            ax.bar(xs, ys, width=width * 0.9, yerr=es, color=colours[arch],
+                   zorder=3)
     ax.axhline(0.0, color=st.INK["primary"], lw=0.8)
     ax.set_xticks(range(len(splits)))
     ax.set_xticklabels(splits)
-    ax.set_ylabel("Skill vs. baseline")
+    ax.set_ylabel("Skill vs. baseline (median over seeds)")
     ax.set_xlabel("Held-out dimension")
-    ax.set_title("positive = beats predicting the shelf mean", fontsize=6.5)
+    ax.set_title("positive = beats predicting the shelf mean; bars are the IQR",
+                 fontsize=6.5)
     st.soften_grid(ax)
     st.panel_label(ax, "b")
 
