@@ -29,6 +29,7 @@ import matplotlib                                                  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt                                    # noqa: E402
 from matplotlib.lines import Line2D                                # noqa: E402
+from matplotlib.patches import Patch                               # noqa: E402
 
 from aisgnn.config import BOXMODEL_DIR, FIGURE_DIR, RUN_DIR, ensure_dirs  # noqa: E402
 from aisgnn.viz import style as st                                 # noqa: E402
@@ -56,36 +57,11 @@ def unavailable(ax, message: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Figure 2: emulator skill
+# Figure 2: the emulator, skill and learned connectivity
 # --------------------------------------------------------------------------- #
 
-def figure_skill(skill: dict, path: Path) -> list[str]:
-    """Emulator skill by architecture and held-out dimension.
-
-    The legend is a single shared one placed above both panels.  Inside the axes
-    it unavoidably sits on top of the bars -- the tallest group is at the left,
-    where a legend would naturally go -- and its baseline entry collided with the
-    baseline line itself.
-    """
-    st.use_style()
-    fig, axes = plt.subplots(1, 2, figsize=(st.WIDTH_DOUBLE, 2.9))
-
-    if not skill or not skill.get("by_arch_split"):
-        for ax in axes:
-            unavailable(ax, "no training runs found")
-        return st.save(fig, path)
-
-    rows = skill["by_arch_split"]
-    # Ordered easiest to hardest, which is the order the text discusses them in;
-    # sorting alphabetically would put the hardest case first.
-    order = [sp for sp in ("shelf", "year", "scenario")
-             if any(v["split"] == sp for v in rows.values())]
-    colours = dict(zip(ARCH_ORDER, st.categorical(len(ARCH_ORDER))))
-    width = 0.8 / max(len(ARCH_ORDER), 1)
-    ekw = dict(ecolor=st.INK["secondary"], capsize=1.2, elinewidth=0.7)
-
-    # (a) RMSE against the per-shelf-mean baseline.
-    ax = axes[0]
+def _panel_rmse(ax, rows, order, colours, width, ekw) -> None:
+    """Test error per architecture, against the baseline each split has to beat."""
     for k, arch in enumerate(ARCH_ORDER):
         xs, ys, es = [], [], []
         for i, split in enumerate(order):
@@ -112,10 +88,10 @@ def figure_skill(skill: dict, path: Path) -> list[str]:
     ax.set_ylabel("Test RMSE (m yr$^{-1}$)")
     ax.set_xlabel("Held-out dimension")
     st.soften_grid(ax)
-    st.panel_label(ax, "a")
 
-    # (b) Median skill relative to that baseline.
-    ax = axes[1]
+
+def _panel_skill(ax, rows, order, colours, width, ekw) -> None:
+    """The same runs expressed as skill relative to that baseline."""
     for k, arch in enumerate(ARCH_ORDER):
         xs, ys, es = [], [], []
         for i, split in enumerate(order):
@@ -135,33 +111,10 @@ def figure_skill(skill: dict, path: Path) -> list[str]:
     ax.set_ylabel("Skill vs. baseline")
     ax.set_xlabel("Held-out dimension")
     st.soften_grid(ax)
-    st.panel_label(ax, "b")
-
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=5, frameon=False,
-               fontsize=6.0, bbox_to_anchor=(0.5, -0.02),
-               handlelength=1.6, columnspacing=1.4)
-    fig.tight_layout(rect=(0, 0.085, 1, 1))
-    return st.save(fig, path)
 
 
-# --------------------------------------------------------------------------- #
-# Figure 3: connectivity
-# --------------------------------------------------------------------------- #
-
-def figure_connectivity(conn: list, path: Path) -> list[str]:
-    st.use_style()
-    fig, axes = plt.subplots(1, 2, figsize=(st.WIDTH_DOUBLE, 2.7))
-
-    if not conn:
-        for ax in axes:
-            unavailable(ax, "no connectivity analysis found")
-        return st.save(fig, path)
-
-    colours = dict(zip(ARCH_ORDER, st.categorical(len(ARCH_ORDER))))
-
-    # (a) influence versus distance, pooled over shelves.
-    ax = axes[0]
+def _panel_decay(ax, conn, colours) -> None:
+    """Influence on melt against distance from the perturbed cell."""
     for arch in ARCH_ORDER:
         recs = [r for r in conn if r["arch"] == arch and r["distances_km"]]
         if not recs:
@@ -169,62 +122,113 @@ def figure_connectivity(conn: list, path: Path) -> list[str]:
         n = min(len(r["influence"]) for r in recs)
         d = np.mean([r["distances_km"][:n] for r in recs], axis=0)
         inf = np.mean([r["influence"][:n] for r in recs], axis=0)
-        ax.plot(d, inf, color=colours[arch], lw=1.3, label=ARCH_LABEL[arch])
+        ax.plot(d, inf, color=colours[arch], lw=1.3)
     ax.set_xlabel("Distance from perturbed cell (km)")
     ax.set_ylabel("Normalised influence on melt")
-    ax.legend(fontsize=5.8)
     st.soften_grid(ax)
-    st.panel_label(ax, "a")
 
-    # (b) fitted length scale per shelf, by scenario.
-    ax = axes[1]
+
+def _panel_length(ax, conn) -> None:
+    """Fitted e-folding length per cavity, with unresolved fits drawn as bounds."""
     graph_arch = [a for a in ("gat", "gcn", "egcn")
                   if any(r["arch"] == a for r in conn)]
     if not graph_arch:
         unavailable(ax, "no graph architecture available")
-    else:
-        arch = graph_arch[0]
-        by_shelf = defaultdict(dict)
-        for r in conn:
-            if r["arch"] != arch:
-                continue
-            # A shelf whose decay is unresolved contributes an upper bound, drawn
-            # open with an arrow, never a filled bar: plotting a bound as though
-            # it were a fitted value is the error this panel exists to avoid.
-            by_shelf[r["shelf"]][r["simulation"]] = (
-                r.get("length_scale_km"), r.get("upper_bound_km"),
-                bool(r.get("resolved")))
-        shelves = sorted(by_shelf)
-        y = np.arange(len(shelves))
-        for j, sim in enumerate(("SMITH_bf663", "SMITH_bi646")):
-            off = (j - 0.5) * 0.38
-            for i, shelf in enumerate(shelves):
-                entry = by_shelf[shelf].get(sim)
-                if entry is None:
-                    continue
-                L, bound, resolved = entry
-                if resolved and L:
-                    ax.barh(i + off, L, height=0.34, color=st.CATEGORICAL[j],
-                            zorder=3)
-                elif bound:
-                    ax.barh(i + off, bound, height=0.34, facecolor="none",
-                            edgecolor=st.CATEGORICAL[j], lw=0.8, zorder=3,
-                            hatch="///")
-        ax.set_yticks(y)
-        ax.set_yticklabels(shelves, fontsize=6.0)
-        ax.set_xlabel("Connectivity length scale (km)")
-        ax.text(0.97, 0.04, ARCH_LABEL[arch], transform=ax.transAxes,
-                fontsize=5.8, ha="right", va="bottom", color=st.INK["secondary"])
-        handles = [Line2D([], [], color=st.CATEGORICAL[j], lw=4,
-                          label=SCENARIO_LABEL.get(sim, sim))
-                   for j, sim in enumerate(("SMITH_bf663", "SMITH_bi646"))]
-        handles.append(Line2D([], [], color=st.INK["secondary"], lw=0.8,
-                              marker="", label="hatched = upper bound only"))
-        ax.legend(handles=handles, fontsize=5.4)
-        st.soften_grid(ax, axis="x")
-    st.panel_label(ax, "b")
+        return
 
-    fig.tight_layout()
+    arch = graph_arch[0]
+    by_shelf = defaultdict(dict)
+    for r in conn:
+        if r["arch"] != arch:
+            continue
+        # A shelf whose decay is unresolved contributes an upper bound, drawn
+        # open with a hatch, never a filled bar: plotting a bound as though it
+        # were a fitted value is the error this panel exists to avoid.
+        by_shelf[r["shelf"]][r["simulation"]] = (
+            r.get("length_scale_km"), r.get("upper_bound_km"),
+            bool(r.get("resolved")))
+
+    shelves = sorted(by_shelf)
+    y = np.arange(len(shelves))
+    for j, sim in enumerate(("SMITH_bf663", "SMITH_bi646")):
+        off = (j - 0.5) * 0.38
+        for i, shelf in enumerate(shelves):
+            entry = by_shelf[shelf].get(sim)
+            if entry is None:
+                continue
+            L, bound, resolved = entry
+            if resolved and L:
+                ax.barh(i + off, L, height=0.34, color=st.CATEGORICAL[j],
+                        zorder=3)
+            elif bound:
+                ax.barh(i + off, bound, height=0.34, facecolor="none",
+                        edgecolor=st.CATEGORICAL[j], lw=0.8, zorder=3,
+                        hatch="///")
+    ax.set_yticks(y)
+    ax.set_yticklabels(shelves, fontsize=5.6)
+    ax.set_xlabel("Connectivity length scale (km)")
+    # Upper left: the only corner not occupied by a bar or the legend.
+    ax.text(0.03, 0.97, ARCH_LABEL[arch], transform=ax.transAxes,
+            fontsize=5.6, ha="left", va="top", color=st.INK["secondary"])
+    ax.legend(handles=[
+        Line2D([], [], color=st.CATEGORICAL[j], lw=4,
+               label=SCENARIO_LABEL.get(sim, sim))
+        for j, sim in enumerate(("SMITH_bf663", "SMITH_bi646"))
+    ] + [Patch(facecolor="none", edgecolor=st.INK["secondary"], lw=0.8,
+               hatch="///", label="Upper bound only")],
+        fontsize=5.2, loc="lower right", frameon=False)
+    st.soften_grid(ax, axis="x")
+
+
+def figure_emulator(skill: dict, conn: list, path: Path) -> list[str]:
+    """Emulator skill and the spatial connectivity it learns.
+
+    Skill and connectivity are one figure because they answer one question in
+    two steps: whether spatial coupling helps, and over what distance the model
+    thinks it acts.  Splitting them separated the claim from its mechanism.
+
+    The architecture legend is shared and sits below all four panels.  Inside
+    the axes it lands on the bars, since the tallest group is at the left where
+    a legend would naturally go, and its baseline entry collided with the
+    baseline rule itself.
+    """
+    st.use_style()
+    fig, axes = plt.subplots(2, 2, figsize=(st.WIDTH_DOUBLE, 5.0))
+
+    have_skill = bool(skill and skill.get("by_arch_split"))
+    colours = dict(zip(ARCH_ORDER, st.categorical(len(ARCH_ORDER))))
+
+    if have_skill:
+        rows = skill["by_arch_split"]
+        # Ordered easiest to hardest, the order the text discusses them in;
+        # sorting alphabetically would put the hardest case first.
+        order = [sp for sp in ("shelf", "year", "scenario")
+                 if any(v["split"] == sp for v in rows.values())]
+        width = 0.8 / max(len(ARCH_ORDER), 1)
+        ekw = dict(ecolor=st.INK["secondary"], capsize=1.2, elinewidth=0.7)
+        _panel_rmse(axes[0, 0], rows, order, colours, width, ekw)
+        _panel_skill(axes[0, 1], rows, order, colours, width, ekw)
+    else:
+        for ax in axes[0]:
+            unavailable(ax, "no training runs found")
+
+    if conn:
+        _panel_decay(axes[1, 0], conn, colours)
+        _panel_length(axes[1, 1], conn)
+    else:
+        for ax in axes[1]:
+            unavailable(ax, "no connectivity analysis found")
+
+    for ax, letter in zip(axes.ravel(), "abcd"):
+        st.panel_label(ax, letter)
+
+    if have_skill:
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc="lower center", ncol=5, frameon=False,
+                   fontsize=6.0, bbox_to_anchor=(0.5, -0.01),
+                   handlelength=1.6, columnspacing=1.4)
+
+    fig.tight_layout(rect=(0, 0.055, 1, 1))
     return st.save(fig, path)
 
 
@@ -490,17 +494,15 @@ def main() -> int:
     outdir = args.outdir or FIGURE_DIR
     outdir.mkdir(parents=True, exist_ok=True)
 
-    wanted = set(args.only) if args.only else {1, 2, 3, 4, 6}
+    wanted = set(args.only) if args.only else {1, 2, 4, 6}
     written = []
 
     if 1 in wanted:
         written += figure_flowchart(outdir / "fig01_methodology")
     if 2 in wanted:
-        written += figure_skill(load(adir / "skill.json"),
-                                outdir / "fig02_emulator_skill")
-    if 3 in wanted:
-        written += figure_connectivity(load(adir / "connectivity.json") or [],
-                                       outdir / "fig03_connectivity")
+        written += figure_emulator(load(adir / "skill.json"),
+                                   load(adir / "connectivity.json") or [],
+                                   outdir / "fig02_emulator")
     if 4 in wanted:
         written += figure_controls(load(adir / "controls.json") or {},
                                    outdir / "fig04_controls")
