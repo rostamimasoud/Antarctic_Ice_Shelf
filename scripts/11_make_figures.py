@@ -308,9 +308,12 @@ def figure_response(response: list, ice: dict, path: Path) -> list[str]:
 
     # (b) closed-loop forward and reverse branches.
     ax = axes[1]
-    loops = [r for r in (response or []) if r.get("closed_loop")]
+    loops = [r for r in (response or [])
+             if r.get("closed_loop", {}).get("converged")]
     if not loops:
-        unavailable(ax, "no closed-loop sweep available")
+        unavailable(ax, "closed-loop sweep did not converge:\n"
+                        "meltwater feedback gain exceeds one,\n"
+                        "so no bounded fixed point exists")
     else:
         r = loops[0]
         cl = r["closed_loop"]
@@ -320,7 +323,8 @@ def figure_response(response: list, ice: dict, path: Path) -> list[str]:
                 ls=(0, (4, 2)), label="Reverse")
         ax.set_xlabel("Thermal-driving offset ($^\\circ$C)")
         ax.set_ylabel("Area-mean melt (m yr$^{-1}$)")
-        ax.set_title(f"{r['shelf']}: loop width {cl['width']:.2f} m yr$^{{-1}}$",
+        ax.set_title(f"{r['shelf']}: loop width {cl['width']:.2f} m yr$^{{-1}}$ "
+                     f"(gain {cl.get('loop_gain', float('nan')):.2f})",
                      fontsize=6.5)
         ax.legend(fontsize=5.8)
         st.soften_grid(ax)

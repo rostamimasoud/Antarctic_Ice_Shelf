@@ -236,8 +236,10 @@ def run_response(models: dict, graphs: dict, offsets: np.ndarray,
                     "offsets": loop.values.tolist(),
                     "forward": loop.forward.tolist(),
                     "reverse": loop.reverse.tolist(),
-                    "width": loop.width, "loop_area": loop.loop_area,
-                    "note": loop.note,
+                    "width": loop.width if loop.converged else None,
+                    "loop_area": loop.loop_area if loop.converged else None,
+                    "converged": loop.converged, "n_failed": loop.n_failed,
+                    "loop_gain": loop.loop_gain, "note": loop.note,
                 }
             except (RuntimeError, ValueError) as exc:
                 log(f"  closed loop failed for {arch} {shelf}: {exc}")
@@ -246,6 +248,8 @@ def run_response(models: dict, graphs: dict, offsets: np.ndarray,
             log(f"  {arch:5s} {shelf:16s} {sim:12s} sharpness {thr.sharpness:6.2f} "
                 f"abrupt={thr.is_abrupt}"
                 + (f"  loop width {record['closed_loop']['width']:.3f} m/yr"
+                   if record.get("closed_loop", {}).get("converged")
+                   else "  closed loop not converged"
                    if "closed_loop" in record else ""))
     return out
 

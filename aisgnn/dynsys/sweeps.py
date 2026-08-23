@@ -194,7 +194,13 @@ def detect_threshold(result: SweepResult,
 
 @dataclass
 class HysteresisResult:
-    """Forward and reverse branches of a closed-loop sweep."""
+    """Forward and reverse branches of a closed-loop sweep.
+
+    ``converged`` is False when the meltwater fixed point failed to settle at one
+    or more forcing steps.  A non-converged sweep must not be interpreted: the
+    branches then reflect an oscillating iteration rather than two coexisting
+    states, and the apparent loop width can exceed any physical melt rate.
+    """
 
     parameter: str
     shelf: str
@@ -203,6 +209,9 @@ class HysteresisResult:
     reverse: np.ndarray
     width: float                           # max separation between branches
     loop_area: float                       # enclosed area, the hysteresis measure
+    converged: bool = True
+    n_failed: int = 0
+    loop_gain: float = float("nan")        # estimated feedback gain
     note: str = ""
     history: dict = field(default_factory=dict)
 
@@ -235,46 +244,92 @@ def closed_loop_sweep(model, data, parameter: str = "thermal_driving",
 
     names = list(NODE_FEATURES)
     idx = names.index(parameter)
+    partner = ("thermal_driving" if parameter == "T"
+               else "T" if parameter == "thermal_driving" else None)
+    jdx = names.index(partner) if partner in names else None
     weights = area_weights(data)
     model.eval()
 
-    def settle(offset: float, start: float) -> tuple[float, float]:
-        state = start
-        for _ in range(n_relax):
-            work = data.clone()
-            x = work.x.clone()
-            x[:, idx] = x[:, idx] + offset - state
-            if parameter in ("T", "thermal_driving"):
-                partner = "thermal_driving" if parameter == "T" else "T"
-                if partner in names:
-                    j = names.index(partner)
-                    x[:, j] = x[:, j] + offset - state
-            work.x = x
-            melt = float((model.denormalise(model(work)) * weights).sum())
-            target = feedback * melt
-            new = state + relax * (target - state)
-            if abs(new - state) < 1e-6:
-                state = new
+    def melt_at(offset: float, state: float) -> float:
+        work = data.clone()
+        x = work.x.clone()
+        shift = offset - state
+        x[:, idx] = x[:, idx] + shift
+        if jdx is not None:
+            x[:, jdx] = x[:, jdx] + shift
+        work.x = x
+        return float((model.denormalise(model(work)) * weights).sum())
+
+    def settle(offset: float, start: float) -> tuple[float, float, bool]:
+        """Solve ``state = feedback * melt(offset - state)`` by bisection.
+
+        Fixed-point relaxation diverges here whenever the loop gain
+        ``feedback * d(melt)/d(forcing)`` exceeds one, which it does for the
+        larger cavities: the iteration then oscillates and the two branches
+        differ by hundreds of m/yr, far more than any physical melt rate, giving
+        a spurious hysteresis loop.  The residual
+        ``r(state) = feedback * melt(offset - state) - state`` is monotonically
+        decreasing in ``state``, so bisection converges unconditionally.
+        """
+        def residual(s: float) -> float:
+            return feedback * melt_at(offset, s) - s
+
+        lo = 0.0
+        r_lo = residual(lo)
+        if r_lo <= 0.0:
+            return melt_at(offset, lo), lo, True
+
+        hi = max(4.0 * r_lo, 1.0)
+        for _ in range(12):
+            if residual(hi) <= 0.0:
                 break
-            state = new
-        return melt, state
+            hi *= 2.0
+        else:
+            # No sign change found: the feedback is too strong for any bounded
+            # state, which is a modelling failure rather than a result.
+            return melt_at(offset, lo), lo, False
+
+        for _ in range(n_relax):
+            mid = 0.5 * (lo + hi)
+            if residual(mid) > 0.0:
+                lo = mid
+            else:
+                hi = mid
+            if hi - lo < 1e-4:
+                break
+
+        state = 0.5 * (lo + hi)
+        return melt_at(offset, state), state, True
 
     forward = np.empty(offsets.size)
+    reverse = np.empty(offsets.size)
+    failures = 0
+
     state = 0.0
     for i, off in enumerate(offsets):
-        forward[i], state = settle(float(off), state)
+        forward[i], state, ok = settle(float(off), state)
+        failures += not ok
 
-    reverse = np.empty(offsets.size)
     for i, off in enumerate(offsets[::-1]):
-        reverse[offsets.size - 1 - i], state = settle(float(off), state)
+        reverse[offsets.size - 1 - i], state, ok = settle(float(off), state)
+        failures += not ok
+
+    # Loop gain from the open-loop slope, for reporting alongside the result.
+    span = float(offsets[-1] - offsets[0]) or 1.0
+    gain = abs(feedback * (forward[-1] - forward[0]) / span)
 
     gap = np.abs(forward - reverse)
+    converged = failures == 0
     return HysteresisResult(
         parameter=parameter, shelf=getattr(data, "shelf", ""),
         values=offsets, forward=forward, reverse=reverse,
-        width=float(np.nanmax(gap)),
-        loop_area=float(_trapezoid(gap, offsets)),
-        note=f"closed loop, feedback={feedback} degC per m/yr",
+        width=float(np.nanmax(gap)) if converged else float("nan"),
+        loop_area=float(_trapezoid(gap, offsets)) if converged else float("nan"),
+        converged=converged, n_failed=int(failures), loop_gain=gain,
+        note=(f"closed loop by bisection, feedback={feedback} degC per m/yr, "
+              f"loop gain ~{gain:.2f}" if converged else
+              f"{failures} forcing steps had no bounded fixed point; "
+              f"loop gain ~{gain:.2f} -- not interpretable"),
     )
 
 
