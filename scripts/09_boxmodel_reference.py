@@ -38,7 +38,7 @@ from aisgnn.boxmodel.calibrate import (                      # noqa: E402
 )
 from aisgnn.boxmodel.cavity import CAVITIES, BoxParams, CavityBoxModel  # noqa: E402
 from aisgnn.boxmodel.continuation import bifurcation_diagram  # noqa: E402
-from aisgnn.boxmodel.rtipping import critical_rate            # noqa: E402
+from aisgnn.boxmodel.rtipping import critical_rate, run_ramp  # noqa: E402
 from aisgnn.config import BOXMODEL_DIR, FIGURE_DIR, ensure_dirs  # noqa: E402
 
 #: Continuation ranges per control parameter: (start, min, max).
@@ -186,127 +186,194 @@ def run_rtipping(cavities: list[str], params: dict[str, float],
 # Figure
 # --------------------------------------------------------------------------- #
 
-def make_figure(cont_T: dict, cont_sigma: dict, rtip: dict, path: Path) -> list[str]:
-    """Four-panel summary of the box-model bifurcation structure."""
+def compute_ramp_trajectories(params: dict, cavity: str, cont_sigma: dict,
+                              durations=(5.0, 25.0, 100.0, 500.0)) -> dict:
+    """Ramp sea-ice formation towards the fold at several rates.
+
+    Two sets of runs.  The first ramps to a target \SI{5}{\percent} short of the
+    quasi-static threshold: if any of these tipped, the tipping would be
+    rate-induced, because the forcing never reaches the bifurcation.  The second
+    is a positive control that ramps \SI{5}{\percent} past the threshold and must
+    tip, which is what shows that a null result from the first set reflects the
+    system rather than a detector that never fires.
+    """
+    rec = cont_sigma.get(cavity, {})
+    folds = [f["p"] for f in rec.get("folds", [])
+             if f["direction"] == "cold_to_warm" and f["p"] < rec.get("present_day", 0)]
+    if not folds:
+        return {}
+
+    p_bif = max(folds)
+    p0 = rec["present_day"]
+    obs = OBSERVATIONS[cavity]
+    base = BoxParams(CAVITIES[cavity], T_cdw=obs.T_cdw, sigma=obs.sigma, **params)
+
+    out = {"cavity": cavity, "p_present": p0, "p_bifurcation": p_bif,
+           "safe": [], "control": None}
+
+    for tau in durations:
+        target = p0 + 0.95 * (p_bif - p0)
+        res = run_ramp(base, "sigma", p0, target, tau)
+        out["safe"].append({"tau": tau, "target": target, "tipped": res.tipped,
+                            "t": res.t[::4].tolist(),
+                            "melt": res.melt[::4].tolist()})
+        log(f"  tau={tau:6.1f} yr to sigma={target:5.2f} (95% of the way): "
+            f"tipped={res.tipped}")
+
+    target = p0 + 1.05 * (p_bif - p0)
+    res = run_ramp(base, "sigma", p0, target, durations[0])
+    out["control"] = {"tau": durations[0], "target": target, "tipped": res.tipped,
+                      "t": res.t[::4].tolist(), "melt": res.melt[::4].tolist()}
+    log(f"  positive control to sigma={target:5.2f} (105%): tipped={res.tipped}")
+    return out
+
+
+def make_figure(cont_T: dict, cont_sigma: dict, ramps: dict, path: Path,
+                cavity: str = "Ross") -> list[str]:
+    """Dynamical-systems characterisation of one cavity, in four panels.
+
+    Panels c and d previously showed hysteresis widths taken from the CDW
+    continuation and a rate-induced tipping summary.  Both were empty by
+    construction: no cavity is bistable in CDW temperature, so the first had
+    nothing to plot, and no cavity exhibits rate-induced tipping, so the second
+    had nothing either.  They are replaced by the two diagnostics that do carry
+    information: the leading eigenvalue along the branch, which is the formal
+    signature of the saddle-node, and the ramp experiment itself, which shows the
+    null result together with the positive control that validates it.
+    """
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
 
     from aisgnn.viz import style as st
 
     st.use_style()
-    fig = plt.figure(figsize=(st.WIDTH_DOUBLE, 4.8))
-    gs = fig.add_gridspec(2, 2, hspace=0.42, wspace=0.28)
-    axes = [fig.add_subplot(gs[i, j]) for i in (0, 1) for j in (0, 1)]
+    fig, axes = plt.subplots(2, 2, figsize=(st.WIDTH_DOUBLE, 4.9))
 
-    def draw_branch(ax, rec, xlabel):
-        """Stable branches solid and coloured by regime; unstable branch dashed."""
+    def branches(ax, rec, xlabel, shade=True):
         p = np.asarray(rec["p"])
-        melt = np.asarray(rec["melt"])
+        m = np.asarray(rec["melt"])
         stable = np.asarray(rec["stable"], bool)
-
         hy = rec.get("hysteresis")
-        if hy:
-            ax.axvspan(hy["p_reverse"], hy["p_forward"], color=st.REGIME["bistable"],
-                       zorder=0, lw=0)
-
-        # Split into runs so the dashed unstable segment is not bridged.
+        if shade and hy:
+            ax.axvspan(hy["p_reverse"], hy["p_forward"],
+                       color=st.REGIME["bistable"], zorder=0, lw=0)
+        mid = 0.5 * (m.max() + m.min())
         edges = np.flatnonzero(np.diff(stable.astype(int)) != 0) + 1
         for seg in np.split(np.arange(p.size), edges):
             if seg.size < 2:
                 continue
-            is_stable = bool(stable[seg[0]])
-            warm = melt[seg].mean() > 0.5 * (melt.max() + melt.min())
-            colour = st.REGIME["warm"] if warm else st.REGIME["cold"]
-            ax.plot(p[seg], melt[seg],
-                    color=colour if is_stable else st.REGIME["unstable"],
-                    ls="-" if is_stable else (0, (3, 2)),
-                    lw=1.4 if is_stable else 1.0, zorder=3 if is_stable else 2)
-
+            ok = bool(stable[seg[0]])
+            warm = m[seg].mean() > mid
+            ax.plot(p[seg], m[seg],
+                    color=(st.REGIME["warm"] if warm else st.REGIME["cold"])
+                    if ok else st.REGIME["unstable"],
+                    ls="-" if ok else (0, (3, 2)), lw=1.4 if ok else 1.0,
+                    zorder=3 if ok else 2)
         for f in rec["folds"]:
-            ax.plot([f["p"]], [f["melt"]], marker="o", ms=4.0,
-                    color=st.INK["primary"], mec=st.INK["surface"], mew=0.6, zorder=5)
-
+            ax.plot([f["p"]], [f["melt"]], "o", ms=4.0, color=st.INK["primary"],
+                    mec="white", mew=0.6, zorder=5)
         ax.axvline(rec["present_day"], color=st.INK["muted"], lw=0.7,
                    ls=(0, (1, 2)), zorder=1)
         ax.set_xlabel(xlabel)
-        ax.set_ylabel("Basal melt rate (m yr$^{-1}$)")
+        ax.set_ylabel("Melt rate (m yr$^{-1}$)")
         st.soften_grid(ax)
 
-    # (a), (b): the two control parameters for Filchner-Ronne.
-    cav = "Filchner-Ronne"
-    for ax, cont, xlabel, letter in (
-        (axes[0], cont_T, "CDW temperature $T_{\\mathrm{CDW}}$ ($^\\circ$C)", "a"),
-        (axes[1], cont_sigma, "Sea-ice formation rate $\\Sigma$ (m yr$^{-1}$)", "b"),
-    ):
-        rec = cont.get(cav)
-        if rec and rec.get("ok"):
-            draw_branch(ax, rec, xlabel)
-            ax.text(0.04, 0.93, cav, transform=ax.transAxes,
-                    fontsize=6.0, ha="left", va="top",
-                    color=st.INK["secondary"])
-        st.panel_label(ax, letter)
-
-    # Legend by proxy: identity is never colour-alone, so it is spelled out.
-    from matplotlib.lines import Line2D
-    from matplotlib.patches import Patch
-    axes[0].legend(handles=[
-        Line2D([], [], color=st.REGIME["cold"], lw=1.4, label="Cold regime (stable)"),
-        Line2D([], [], color=st.REGIME["warm"], lw=1.4, label="Warm regime (stable)"),
-        Line2D([], [], color=st.REGIME["unstable"], lw=1.0, ls=(0, (3, 2)),
-               label="Unstable branch"),
-        Patch(facecolor=st.REGIME["bistable"], label="Bistable window"),
-    ], loc="upper left", fontsize=6.0)
-
-    # (c): hysteresis width in CDW temperature across cavities.
-    ax = axes[2]
-    rows = [(c, r["hysteresis"]["width"], r["hysteresis"]["melt_jump"])
-            for c, r in cont_T.items()
-            if r.get("ok") and "hysteresis" in r]
-    rows.sort(key=lambda t: t[1])
-    if rows:
-        names = [r[0] for r in rows]
-        widths = [r[1] for r in rows]
-        y = np.arange(len(rows))
-        ax.barh(y, widths, height=0.6, color=st.REGIME["cold"], zorder=3)
-        ax.set_yticks(y)
-        ax.set_yticklabels(names, fontsize=6.0)
-        ax.set_xlabel("Hysteresis width $\\Delta T_{\\mathrm{hyst}}$ ($^\\circ$C)")
-        for yi, w in zip(y, widths):
-            ax.text(w + 0.02, yi, f"{w:.2f}", va="center", fontsize=5.5,
-                    color=st.INK["secondary"])
-        st.soften_grid(ax, axis="x")
+    # (a) CDW temperature: monotone, no fold anywhere in range.
+    ax = axes[0, 0]
+    rec_T = cont_T.get(cavity)
+    if rec_T and rec_T.get("ok"):
+        branches(ax, rec_T, "CDW temperature $T_{\\mathrm{CDW}}$ ($^\\circ$C)",
+                 shade=False)
+        ax.text(0.96, 0.08, "no fold in range", transform=ax.transAxes,
+                fontsize=5.8, ha="right", va="bottom", color=st.INK["secondary"])
     else:
-        ax.text(0.5, 0.5, "no bistable cavities found", ha="center", va="center",
-                transform=ax.transAxes, color=st.INK["muted"], fontsize=6.5)
-        ax.set_axis_off()
+        unavailable(ax, "no CDW continuation")
+    st.panel_label(ax, "a")
+
+    # (b) Sea-ice formation: the parameter that carries the bifurcation.
+    ax = axes[0, 1]
+    rec_s = cont_sigma.get(cavity)
+    if rec_s and rec_s.get("ok"):
+        branches(ax, rec_s, "Sea-ice formation rate $\\Sigma$ (m yr$^{-1}$)")
+        ax.legend(handles=[
+            Line2D([], [], color=st.REGIME["cold"], lw=1.4, label="Cold, stable"),
+            Line2D([], [], color=st.REGIME["warm"], lw=1.4, label="Warm, stable"),
+            Line2D([], [], color=st.REGIME["unstable"], lw=1.0, ls=(0, (3, 2)),
+                   label="Unstable"),
+            Patch(facecolor=st.REGIME["bistable"], label="Bistable window"),
+        ], loc="upper right", fontsize=5.2, frameon=True, edgecolor="none",
+            facecolor="white", framealpha=0.9)
+    else:
+        unavailable(ax, "no continuation in sigma")
+    st.panel_label(ax, "b")
+
+    # (c) Leading eigenvalue: zero exactly at the folds.
+    ax = axes[1, 0]
+    if rec_s and rec_s.get("ok") and rec_s.get("eig_max"):
+        p = np.asarray(rec_s["p"])
+        lam = np.asarray(rec_s["eig_max"])
+        stable = np.asarray(rec_s["stable"], bool)
+        scale = 1e9                      # eigenvalues are O(1e-8) per second
+        ax.axhline(0.0, color=st.INK["primary"], lw=0.8, zorder=4)
+        ax.plot(p[stable], lam[stable] * scale, ".", ms=1.6,
+                color=st.REGIME["cold"], zorder=3)
+        ax.plot(p[~stable], lam[~stable] * scale, ".", ms=1.6,
+                color=st.REGIME["unstable"], zorder=3)
+        for f in rec_s["folds"]:
+            ax.axvline(f["p"], color=st.INK["muted"], lw=0.7, ls=(0, (2, 2)),
+                       zorder=1)
+        ax.set_xlabel("Sea-ice formation rate $\\Sigma$ (m yr$^{-1}$)")
+        ax.set_ylabel("Leading eigenvalue\n$\\mathrm{Re}(\\lambda)$ ($10^{-9}$ s$^{-1}$)")
+        ax.legend(handles=[
+            Line2D([], [], color=st.REGIME["cold"], marker=".", ls="", ms=5,
+                   label="Stable, $\\mathrm{Re}(\\lambda)<0$"),
+            Line2D([], [], color=st.REGIME["unstable"], marker=".", ls="", ms=5,
+                   label="Unstable, $\\mathrm{Re}(\\lambda)>0$"),
+        ], loc="upper right", fontsize=5.2, frameon=False)
+        st.soften_grid(ax)
+    else:
+        unavailable(ax, "no eigenvalues stored")
     st.panel_label(ax, "c")
 
-    # (d): rate-induced tipping boundary.
-    ax = axes[3]
-    plotted = 0
-    for colour, (cav_name, rec) in zip(st.CATEGORICAL, sorted(rtip.items())):
-        pts = [(t["p_target"], t["tau_critical"]) for t in rec["targets"]
-               if t.get("tau_critical")]
-        if not pts:
-            continue
-        xs, ys = zip(*pts)
-        ax.plot(xs, ys, marker="o", ms=3.0, color=colour, lw=1.2, label=cav_name)
-        ax.axvline(rec["p_bifurcation"], color=colour, lw=0.7, ls=(0, (1, 2)))
-        plotted += 1
-
-    if plotted:
-        ax.set_yscale("log")
-        ax.set_xlabel("Target sea-ice formation rate $\\Sigma$ (m yr$^{-1}$)")
-        ax.set_ylabel("Critical ramp duration (yr)")
-        ax.legend(loc="best", fontsize=6.0)
+    # (d) Ramp experiment: the null result with its positive control.
+    ax = axes[1, 1]
+    if ramps and ramps.get("safe"):
+        # The safe ramps differ only in rate, which is a magnitude, so they take
+        # a sequential ramp; the control is a different category and keeps the
+        # warm identity colour.  Using the categorical set for both put the
+        # 25-year ramp in the same vermillion as the control.
+        import matplotlib.pyplot as _plt
+        shades = _plt.get_cmap("aisgnn_seq")(np.linspace(0.35, 0.95,
+                                                         len(ramps["safe"])))
+        for colour, run in zip(shades, ramps["safe"]):
+            ax.plot(run["t"], run["melt"], color=colour, lw=1.1,
+                    label=f"$\\tau$ = {run['tau']:.0f} yr")
+        ctrl = ramps.get("control")
+        if ctrl:
+            ax.plot(ctrl["t"], ctrl["melt"], color=st.REGIME["warm"], lw=1.5,
+                    ls=(0, (4, 2)), zorder=5,
+                    label="past threshold (control)")
+        ax.set_xscale("symlog", linthresh=10)
+        ax.set_xlabel("Time (yr)")
+        ax.set_ylabel("Melt rate (m yr$^{-1}$)")
+        ax.legend(loc="upper left", fontsize=5.2, frameon=False, ncol=2)
         st.soften_grid(ax)
     else:
-        ax.text(0.5, 0.5, "no rate-induced tipping detected", ha="center",
-                va="center", transform=ax.transAxes, color=st.INK["muted"],
-                fontsize=6.5)
-        ax.set_axis_off()
+        unavailable(ax, "no ramp experiments")
     st.panel_label(ax, "d")
 
+    fig.tight_layout()
     return st.save(fig, path)
+
+
+def unavailable(ax, message: str) -> None:
+    ax.text(0.5, 0.5, message, ha="center", va="center", fontsize=6.5,
+            transform=ax.transAxes)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
 
 
 # --------------------------------------------------------------------------- #
@@ -321,6 +388,8 @@ def main() -> int:
     p.add_argument("--skip-rtipping", action="store_true",
                    help="skip the rate-induced tipping bisection")
     p.add_argument("--no-figure", action="store_true")
+    p.add_argument("--figure-cavity", default="Ross",
+                   help="cavity shown in the bifurcation figure")
     p.add_argument("--outdir", type=Path, default=None)
     args = p.parse_args()
 
@@ -358,8 +427,14 @@ def main() -> int:
     n_bistable = sum(1 for r in cont_T.values() if r.get("ok") and "hysteresis" in r)
     log(f"bistable in T_cdw: {n_bistable} of {len(cavities)} cavities")
 
+    log("ramp trajectories for the rate-tipping panel")
+    ramps = compute_ramp_trajectories(cal.params, args.figure_cavity, cont_sigma)
+    (outdir / "ramps.json").write_text(json.dumps(ramps))
+
     if not args.no_figure:
-        paths = make_figure(cont_T, cont_sigma, rtip, FIGURE_DIR / "fig05_boxmodel_bifurcation")
+        paths = make_figure(cont_T, cont_sigma, ramps,
+                            FIGURE_DIR / "fig05_boxmodel_bifurcation",
+                            cavity=args.figure_cavity)
         log(f"figure written: {', '.join(paths)}")
 
     log(f"results in {outdir}")
