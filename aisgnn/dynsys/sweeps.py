@@ -27,6 +27,9 @@ import torch
 
 from ..config import NODE_FEATURES
 
+# numpy 2 renamed trapz to trapezoid and removed the old spelling.
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
 
 @dataclass
 class SweepResult:
@@ -270,7 +273,7 @@ def closed_loop_sweep(model, data, parameter: str = "thermal_driving",
         parameter=parameter, shelf=getattr(data, "shelf", ""),
         values=offsets, forward=forward, reverse=reverse,
         width=float(np.nanmax(gap)),
-        loop_area=float(np.trapz(gap, offsets)),
+        loop_area=float(_trapezoid(gap, offsets)),
         note=f"closed loop, feedback={feedback} degC per m/yr",
     )
 

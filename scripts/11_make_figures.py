@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+"""Generate the manuscript figures from the analysis output.
+
+Reads the JSON written by ``04_analyse.py`` and ``09_boxmodel_reference.py`` and
+writes PDF and PNG into ``figures/``.  Every panel degrades to an explicit
+"not available" note rather than failing, so a partial analysis still produces a
+complete figure set with the gaps visible.
+
+Examples
+--------
+    python scripts/11_make_figures.py
+    python scripts/11_make_figures.py --only 2 3
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import matplotlib                                                  # noqa: E402
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt                                    # noqa: E402
+from matplotlib.lines import Line2D                                # noqa: E402
+
+from aisgnn.config import BOXMODEL_DIR, FIGURE_DIR, RUN_DIR, ensure_dirs  # noqa: E402
+from aisgnn.viz import style as st                                 # noqa: E402
+
+ARCH_LABEL = {"mlp": "MLP (no spatial coupling)", "gcn": "GCN",
+              "gat": "GAT", "egcn": "Edge-conditioned"}
+ARCH_ORDER = ("mlp", "gcn", "gat", "egcn")
+SCENARIO_LABEL = {"SMITH_bf663": "REPEAT1970", "SMITH_bi646": "4$\\times$CO$_2$"}
+
+
+def load(path: Path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def unavailable(ax, message: str) -> None:
+    ax.text(0.5, 0.5, message, ha="center", va="center", fontsize=6.5,
+            color=st.INK["muted"], transform=ax.transAxes, wrap=True)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+
+# --------------------------------------------------------------------------- #
+# Figure 2: emulator skill
+# --------------------------------------------------------------------------- #
+
+def figure_skill(skill: dict, path: Path) -> list[str]:
+    st.use_style()
+    fig, axes = plt.subplots(1, 2, figsize=(st.WIDTH_DOUBLE, 2.6))
+
+    if not skill or not skill.get("by_arch_split"):
+        for ax in axes:
+            unavailable(ax, "no training runs found")
+        return st.save(fig, path)
+
+    rows = skill["by_arch_split"]
+    splits = sorted({v["split"] for v in rows.values()})
+    colours = dict(zip(ARCH_ORDER, st.categorical(len(ARCH_ORDER))))
+
+    # (a) RMSE by architecture and split, against the per-shelf-mean baseline.
+    ax = axes[0]
+    width = 0.8 / max(len(ARCH_ORDER), 1)
+    for k, arch in enumerate(ARCH_ORDER):
+        xs, ys, es = [], [], []
+        for i, split in enumerate(splits):
+            rec = rows.get(f"{arch}_{split}")
+            if rec is None:
+                continue
+            xs.append(i + (k - 1.5) * width)
+            ys.append(rec["rmse_mean"])
+            es.append(rec["rmse_std"])
+        if xs:
+            ax.bar(xs, ys, width=width * 0.9, yerr=es, color=colours[arch],
+                   label=ARCH_LABEL[arch], zorder=3)
+
+    for i, split in enumerate(splits):
+        recs = [v for v in rows.values() if v["split"] == split]
+        if recs:
+            base = np.nanmean([r["baseline_rmse"] for r in recs])
+            ax.plot([i - 0.45, i + 0.45], [base, base], color=st.INK["primary"],
+                    lw=1.0, ls=(0, (3, 2)), zorder=4)
+
+    ax.set_xticks(range(len(splits)))
+    ax.set_xticklabels(splits)
+    ax.set_ylabel("Test RMSE (m yr$^{-1}$)")
+    ax.set_xlabel("Held-out dimension")
+    handles, labels = ax.get_legend_handles_labels()
+    handles.append(Line2D([], [], color=st.INK["primary"], lw=1.0, ls=(0, (3, 2))))
+    labels.append("Per-shelf-mean baseline")
+    ax.legend(handles, labels, fontsize=5.6, loc="upper left", ncol=1)
+    st.soften_grid(ax)
+    st.panel_label(ax, "a")
+
+    # (b) skill relative to the baseline: positive means genuinely spatial skill.
+    ax = axes[1]
+    for k, arch in enumerate(ARCH_ORDER):
+        xs, ys = [], []
+        for i, split in enumerate(splits):
+            rec = rows.get(f"{arch}_{split}")
+            if rec is None or not np.isfinite(rec["baseline_rmse"]):
+                continue
+            xs.append(i + (k - 1.5) * width)
+            ys.append(1.0 - rec["rmse_mean"] / rec["baseline_rmse"])
+        if xs:
+            ax.bar(xs, ys, width=width * 0.9, color=colours[arch], zorder=3)
+    ax.axhline(0.0, color=st.INK["primary"], lw=0.8)
+    ax.set_xticks(range(len(splits)))
+    ax.set_xticklabels(splits)
+    ax.set_ylabel("Skill vs. baseline")
+    ax.set_xlabel("Held-out dimension")
+    ax.set_title("positive = beats predicting the shelf mean", fontsize=6.5)
+    st.soften_grid(ax)
+    st.panel_label(ax, "b")
+
+    fig.tight_layout()
+    return st.save(fig, path)
+
+
+# --------------------------------------------------------------------------- #
+# Figure 3: connectivity
+# --------------------------------------------------------------------------- #
+
+def figure_connectivity(conn: list, path: Path) -> list[str]:
+    st.use_style()
+    fig, axes = plt.subplots(1, 2, figsize=(st.WIDTH_DOUBLE, 2.7))
+
+    if not conn:
+        for ax in axes:
+            unavailable(ax, "no connectivity analysis found")
+        return st.save(fig, path)
+
+    colours = dict(zip(ARCH_ORDER, st.categorical(len(ARCH_ORDER))))
+
+    # (a) influence versus distance, pooled over shelves.
+    ax = axes[0]
+    for arch in ARCH_ORDER:
+        recs = [r for r in conn if r["arch"] == arch and r["distances_km"]]
+        if not recs:
+            continue
+        n = min(len(r["influence"]) for r in recs)
+        d = np.mean([r["distances_km"][:n] for r in recs], axis=0)
+        inf = np.mean([r["influence"][:n] for r in recs], axis=0)
+        ax.plot(d, inf, color=colours[arch], lw=1.3, label=ARCH_LABEL[arch])
+    ax.set_xlabel("Distance from perturbed cell (km)")
+    ax.set_ylabel("Normalised influence on melt")
+    ax.legend(fontsize=5.8)
+    st.soften_grid(ax)
+    st.panel_label(ax, "a")
+
+    # (b) fitted length scale per shelf, by scenario.
+    ax = axes[1]
+    graph_arch = [a for a in ("gat", "gcn", "egcn")
+                  if any(r["arch"] == a for r in conn)]
+    if not graph_arch:
+        unavailable(ax, "no graph architecture available")
+    else:
+        arch = graph_arch[0]
+        by_shelf = defaultdict(dict)
+        for r in conn:
+            if r["arch"] == arch and r["length_scale_km"]:
+                by_shelf[r["shelf"]][r["simulation"]] = r["length_scale_km"]
+        shelves = sorted(by_shelf)
+        y = np.arange(len(shelves))
+        for j, sim in enumerate(("SMITH_bf663", "SMITH_bi646")):
+            vals = [by_shelf[s].get(sim, np.nan) for s in shelves]
+            ax.barh(y + (j - 0.5) * 0.38, vals, height=0.34,
+                    color=st.CATEGORICAL[j],
+                    label=SCENARIO_LABEL.get(sim, sim), zorder=3)
+        ax.set_yticks(y)
+        ax.set_yticklabels(shelves, fontsize=6.0)
+        ax.set_xlabel("Connectivity length scale (km)")
+        ax.set_title(f"{ARCH_LABEL[arch]}", fontsize=6.5)
+        ax.legend(fontsize=5.8)
+        st.soften_grid(ax, axis="x")
+    st.panel_label(ax, "b")
+
+    fig.tight_layout()
+    return st.save(fig, path)
+
+
+# --------------------------------------------------------------------------- #
+# Figure 4: dominant controls
+# --------------------------------------------------------------------------- #
+
+def figure_controls(controls: dict, path: Path) -> list[str]:
+    st.use_style()
+    fig, axes = plt.subplots(1, 2, figsize=(st.WIDTH_DOUBLE, 2.7))
+
+    arch = next((a for a in ("gat", "gcn", "egcn", "mlp")
+                 if controls and a in controls), None)
+    if arch is None:
+        for ax in axes:
+            unavailable(ax, "no intervention analysis found")
+        return st.save(fig, path)
+
+    by_key = controls[arch]
+
+    # (a) sensitivity per feature, averaged within each scenario.
+    ax = axes[0]
+    per_scenario = defaultdict(lambda: defaultdict(list))
+    for key, feats in by_key.items():
+        sim = key.split("|")[1]
+        for feature, rec in feats.items():
+            v = rec.get("sensitivity")
+            if v is not None and np.isfinite(v):
+                per_scenario[sim][feature].append(v)
+
+    features = sorted({f for d in per_scenario.values() for f in d})
+    y = np.arange(len(features))
+    for j, sim in enumerate(("SMITH_bf663", "SMITH_bi646")):
+        vals = [np.nanmean(per_scenario[sim].get(f, [np.nan])) for f in features]
+        ax.barh(y + (j - 0.5) * 0.38, vals, height=0.34, color=st.CATEGORICAL[j],
+                label=SCENARIO_LABEL.get(sim, sim), zorder=3)
+    ax.set_yticks(y)
+    ax.set_yticklabels(features, fontsize=5.8)
+    ax.set_xlabel("Melt response per unit perturbation (m yr$^{-1}$)")
+    ax.axvline(0.0, color=st.INK["primary"], lw=0.8)
+    ax.legend(fontsize=5.8)
+    st.soften_grid(ax, axis="x")
+    st.panel_label(ax, "a")
+
+    # (b) change in sensitivity between scenarios.
+    ax = axes[1]
+    shift = controls.get(f"{arch}_scenario_shift", {})
+    if not shift:
+        unavailable(ax, "no scenario pair available")
+    else:
+        names = sorted(shift, key=lambda k: shift[k])
+        vals = [shift[k] for k in names]
+        colours = [st.REGIME["warm"] if v > 0 else st.REGIME["cold"] for v in vals]
+        ax.barh(np.arange(len(names)), vals, color=colours, zorder=3)
+        ax.set_yticks(np.arange(len(names)))
+        ax.set_yticklabels(names, fontsize=5.8)
+        ax.axvline(0.0, color=st.INK["primary"], lw=0.8)
+        ax.set_xlabel("Change in sensitivity, 4$\\times$CO$_2$ minus REPEAT1970")
+        ax.set_title("positive = gains influence under warming", fontsize=6.5)
+        st.soften_grid(ax, axis="x")
+    st.panel_label(ax, "b")
+
+    fig.tight_layout()
+    return st.save(fig, path)
+
+
+# --------------------------------------------------------------------------- #
+# Figure 6: emulator response and ice coupling
+# --------------------------------------------------------------------------- #
+
+def figure_response(response: list, ice: dict, path: Path) -> list[str]:
+    st.use_style()
+    fig, axes = plt.subplots(1, 3, figsize=(st.WIDTH_DOUBLE, 2.6))
+
+    # (a) open-loop response curves.
+    ax = axes[0]
+    if not response:
+        unavailable(ax, "no sweep results found")
+    else:
+        arch = next((a for a in ("gat", "gcn", "egcn", "mlp")
+                     if any(r["arch"] == a for r in response)), None)
+        recs = [r for r in response if r["arch"] == arch
+                and r["simulation"] == "SMITH_bf663"]
+        for colour, r in zip(st.CATEGORICAL, recs):
+            ax.plot(r["offsets"], r["melt"], color=colour, lw=1.2, label=r["shelf"])
+            if r["is_abrupt"]:
+                ax.plot([r["threshold_location"]],
+                        [np.interp(r["threshold_location"], r["offsets"], r["melt"])],
+                        marker="o", ms=4, color=colour, mec=st.INK["surface"], mew=0.6)
+        ax.set_xlabel("Thermal-driving offset ($^\\circ$C)")
+        ax.set_ylabel("Area-mean melt (m yr$^{-1}$)")
+        ax.legend(fontsize=5.5)
+        ax.set_title("Open loop: no memory", fontsize=6.5)
+        st.soften_grid(ax)
+    st.panel_label(ax, "a")
+
+    # (b) closed-loop forward and reverse branches.
+    ax = axes[1]
+    loops = [r for r in (response or []) if r.get("closed_loop")]
+    if not loops:
+        unavailable(ax, "no closed-loop sweep available")
+    else:
+        r = loops[0]
+        cl = r["closed_loop"]
+        ax.plot(cl["offsets"], cl["forward"], color=st.REGIME["cold"], lw=1.3,
+                label="Forward")
+        ax.plot(cl["offsets"], cl["reverse"], color=st.REGIME["warm"], lw=1.3,
+                ls=(0, (4, 2)), label="Reverse")
+        ax.set_xlabel("Thermal-driving offset ($^\\circ$C)")
+        ax.set_ylabel("Area-mean melt (m yr$^{-1}$)")
+        ax.set_title(f"{r['shelf']}: loop width {cl['width']:.2f} m yr$^{{-1}}$",
+                     fontsize=6.5)
+        ax.legend(fontsize=5.8)
+        st.soften_grid(ax)
+    st.panel_label(ax, "b")
+
+    # (c) grounding-line retreat, abrupt versus gradual.
+    ax = axes[2]
+    if not ice:
+        unavailable(ax, "no ice-sheet results found")
+    else:
+        bed = "prograde" if "prograde" in ice else sorted(ice)[0]
+        block = ice[bed]
+        for colour, key, label in ((st.INK["muted"], "control", "Control"),
+                                   (st.CATEGORICAL[0], "gradual", "Gradual"),
+                                   (st.CATEGORICAL[1], "abrupt", "Abrupt")):
+            if key in block:
+                ax.plot(block[key]["time"], block[key]["position_km"],
+                        color=colour, lw=1.3, label=label)
+        ax.set_xlabel("Time (yr)")
+        ax.set_ylabel("Grounding-line position (km)")
+        ax.set_title(f"{bed} bed", fontsize=6.5)
+        ax.legend(fontsize=5.8)
+        st.soften_grid(ax)
+    st.panel_label(ax, "c")
+
+    fig.tight_layout()
+    return st.save(fig, path)
+
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--analysis", type=Path, default=None)
+    p.add_argument("--boxmodel", type=Path, default=None)
+    p.add_argument("--outdir", type=Path, default=None)
+    p.add_argument("--only", nargs="*", type=int, default=None)
+    args = p.parse_args()
+
+    ensure_dirs()
+    adir = args.analysis or (RUN_DIR / "analysis")
+    bdir = args.boxmodel or BOXMODEL_DIR
+    outdir = args.outdir or FIGURE_DIR
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    wanted = set(args.only) if args.only else {2, 3, 4, 6}
+    written = []
+
+    if 2 in wanted:
+        written += figure_skill(load(adir / "skill.json"),
+                                outdir / "fig02_emulator_skill")
+    if 3 in wanted:
+        written += figure_connectivity(load(adir / "connectivity.json") or [],
+                                       outdir / "fig03_connectivity")
+    if 4 in wanted:
+        written += figure_controls(load(adir / "controls.json") or {},
+                                   outdir / "fig04_controls")
+    if 6 in wanted:
+        written += figure_response(load(adir / "response.json") or [],
+                                   load(adir / "ice.json") or {},
+                                   outdir / "fig06_response_and_ice")
+
+    for path in written:
+        print(f"wrote {path}")
+    print(f"{len(written)} files in {outdir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
