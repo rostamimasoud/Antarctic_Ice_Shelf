@@ -358,6 +358,102 @@ def figure_response(response: list, ice: dict, path: Path) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# Figure 1: methodology flowchart
+# --------------------------------------------------------------------------- #
+
+def figure_flowchart(path: Path) -> list[str]:
+    """Schematic of how the three models relate.
+
+    Laid out as two vertical columns converging on the ice model, so the two
+    independent paths stay visibly separate and no connector crosses a box.
+    Drawn rather than typeset so it carries the same palette and typography as
+    the data figures.
+    """
+    from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
+
+    st.use_style()
+    fig, ax = plt.subplots(figsize=(st.WIDTH_DOUBLE, 4.6))
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 100)
+    ax.axis("off")
+
+    cold, warm, grey = st.REGIME["cold"], st.REGIME["warm"], st.INK["secondary"]
+
+    def box(x, y, w, h, text, face, edge, weight="normal", fs=6.3):
+        ax.add_patch(FancyBboxPatch(
+            (x, y), w, h, boxstyle="round,pad=0.9,rounding_size=1.4",
+            facecolor=face, edgecolor=edge, linewidth=0.8, zorder=3))
+        ax.text(x + w / 2, y + h / 2, text, ha="center", va="center",
+                fontsize=fs, color=st.INK["primary"], zorder=4,
+                fontweight=weight, linespacing=1.4)
+
+    def down(x, y_from, y_to, colour):
+        ax.add_patch(FancyArrowPatch((x, y_from), (x, y_to), arrowstyle="-|>",
+                                     mutation_scale=8, linewidth=0.9,
+                                     color=colour, zorder=2))
+
+    # Note the unicode en dash: matplotlib does not interpret LaTeX "--".
+    left_x, right_x, w, h = 4.0, 55.0, 41.0, 13.0
+    ys = [80.0, 61.0, 42.0, 23.0]
+
+    ax.text(left_x + w / 2, 96.0, "Path 1  ·  bulk dynamics", fontsize=7.0,
+            color=cold, fontweight="bold", ha="center")
+    ax.text(right_x + w / 2, 96.0, "Path 2  ·  spatial structure", fontsize=7.0,
+            color=warm, fontweight="bold", ha="center")
+
+    left = ["Cavity\u2013polynya box model\n4 prognostic variables",
+            "Calibration on observed melt flux,\ncoastal T/S and cavity ventilation",
+            "Pseudo-arclength continuation\nresolving the unstable branch",
+            "Bifurcation diagram, hysteresis\nwidth, rate-induced tipping test"]
+    right = ["NEMO cavity-resolving simulations\n240 graphs, 2 climate scenarios",
+             "GNN training: MLP, GCN, GAT, EGCN\n5 seeds \u00d7 3 held-out regimes",
+             "Spatial connectivity and\ninterventional sensitivity",
+             "Forcing sweeps, open loop\nand closed meltwater loop"]
+
+    for y, lab in zip(ys, left):
+        box(left_x, y, w, h, lab, "#EAF3F8", cold)
+    for y, lab in zip(ys, right):
+        box(right_x, y, w, h, lab, "#FBEDE4", warm)
+
+    for a, b in zip(ys[:-1], ys[1:]):
+        down(left_x + w / 2, a - 0.9, b + h + 0.9, cold)
+        down(right_x + w / 2, a - 0.9, b + h + 0.9, warm)
+
+    # Convergence on the ice model.
+    box(28.0, 2.0, 44.0, 13.0,
+        "Reduced flowline ice model\ngrounding-line response to an abrupt\n"
+        "versus a gradual melt increase",
+        "#F0EEEA", grey, weight="bold")
+
+    ax.add_patch(FancyArrowPatch((left_x + w / 2, ys[-1] - 0.9), (41.0, 15.9),
+                                 arrowstyle="-|>", mutation_scale=8,
+                                 linewidth=0.9, color=cold, zorder=2,
+                                 connectionstyle="arc3,rad=-0.15"))
+    ax.add_patch(FancyArrowPatch((right_x + w / 2, ys[-1] - 0.9), (59.0, 15.9),
+                                 arrowstyle="-|>", mutation_scale=8,
+                                 linewidth=0.9, color=warm, zorder=2,
+                                 connectionstyle="arc3,rad=0.15"))
+    ax.text(30.0, 18.6, "melt thresholds", fontsize=5.8, color=cold,
+            ha="center", va="bottom")
+    ax.text(70.0, 18.6, "melt response", fontsize=5.8, color=warm,
+            ha="center", va="bottom")
+
+    # The cross-check between the two paths is the reason for running both.
+    ax.add_patch(FancyArrowPatch((left_x + w + 0.9, ys[-1] + h / 2),
+                                 (right_x - 0.9, ys[-1] + h / 2),
+                                 arrowstyle="<|-|>", mutation_scale=7,
+                                 linewidth=0.9, color=st.INK["primary"],
+                                 linestyle=(0, (3, 2)), zorder=2))
+    # The gap between columns is only ten units wide, so the annotation is kept
+    # to one short word and the question it poses is carried by the caption.
+    ax.text(50.0, ys[-1] + h / 2 + 1.6, "cross-\ncheck", fontsize=5.6,
+            color=st.INK["primary"], ha="center", va="bottom", style="italic",
+            linespacing=1.2)
+
+    return st.save(fig, path)
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 
@@ -376,9 +472,11 @@ def main() -> int:
     outdir = args.outdir or FIGURE_DIR
     outdir.mkdir(parents=True, exist_ok=True)
 
-    wanted = set(args.only) if args.only else {2, 3, 4, 6}
+    wanted = set(args.only) if args.only else {1, 2, 3, 4, 6}
     written = []
 
+    if 1 in wanted:
+        written += figure_flowchart(outdir / "fig01_methodology")
     if 2 in wanted:
         written += figure_skill(load(adir / "skill.json"),
                                 outdir / "fig02_emulator_skill")
