@@ -341,10 +341,11 @@ def figure_response(response: list, ice: dict, path: Path) -> list[str]:
 
         # The numbers go in the corner rather than the title, which at this
         # width ran under the next panel's label.
-        ax.text(0.03, 0.95, f"width {cl['width']:.2f} m yr$^{{-1}}$\n"
-                            f"gain {cl.get('loop_gain', float('nan')):.2f}",
-                transform=ax.transAxes, fontsize=5.6, va="top", ha="left",
-                color=st.INK["secondary"])
+        ax.text(0.97, 0.06,
+                f"{r['shelf']}\nloop width {cl['width']:.2f} m yr$^{{-1}}$\n"
+                f"feedback gain {cl.get('loop_gain', float('nan')):.2f}",
+                transform=ax.transAxes, fontsize=5.6, va="bottom", ha="right",
+                color=st.INK["secondary"], linespacing=1.35)
         ax.legend(fontsize=5.8)
         st.soften_grid(ax)
     st.panel_label(ax, "b")
@@ -364,8 +365,8 @@ def figure_response(response: list, ice: dict, path: Path) -> list[str]:
                         color=colour, lw=1.3, label=label)
         ax.set_xlabel("Time (yr)")
         ax.set_ylabel("Grounding-line position (km)")
-        ax.text(0.03, 0.04, f"{bed} bed", transform=ax.transAxes,
-                fontsize=5.8, ha="left", va="bottom", color=st.INK["secondary"])
+        ax.text(0.97, 0.72, f"{bed} bed", transform=ax.transAxes,
+                fontsize=5.8, ha="right", va="top", color=st.INK["secondary"])
         ax.legend(fontsize=5.8)
         st.soften_grid(ax)
     st.panel_label(ax, "c")
