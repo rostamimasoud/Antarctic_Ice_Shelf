@@ -52,6 +52,7 @@ from aisgnn.data.nemo import (                                     # noqa: E402
     find_melt,
     get,
     match_shelf,
+    check_melt_sign,
     melt_to_m_per_year,
     open_dataset,
     resolve,
@@ -114,6 +115,7 @@ def build_year(simulation: str, year: int, shelves: list[str], radius: float,
             mask = (isf == ident) & np.isfinite(melt)
             if mask.sum() < 20:
                 continue
+            check_melt_sign(melt, mask, f"{simulation} {shelf_name} {year}")
 
             if dry_run:
                 out[shelf_name] = {"cells": int(mask.sum()),

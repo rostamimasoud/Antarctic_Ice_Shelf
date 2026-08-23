@@ -307,17 +307,44 @@ def first_year(dataset, dim: str = "time") -> int | None:
 
 
 def melt_to_m_per_year(melt: np.ndarray, units: str = "") -> np.ndarray:
-    """Convert an archived melt field to metres of ice per year.
+    """Convert an archived melt field to metres of ice per year, melt positive.
 
-    The SMITH files store a mass flux in kg/m2/s; the OPM files already store
-    m/yr.  Converting the wrong one would rescale the emulator's entire target
-    by a factor of about 3.4e-5 without changing anything that would look wrong
-    in a loss curve.
+    Two conventions have to be reconciled, and getting either wrong is invisible
+    in a loss curve:
+
+    * **Magnitude.** The SMITH files store a mass flux in kg/m2/s while the OPM
+      files already store m/yr; treating one as the other rescales the target by
+      about 3.4e-5.
+    * **Sign.** The SMITH ``melt_cavity`` field is *negative where the ice is
+      melting* -- it is a mass flux out of the ice -- whereas the OPM
+      ``melt_m_ice_per_y`` field is positive for melt. Left unflipped, the
+      emulator learns melt with the opposite sign and every downstream result
+      inverts: melt appears to *decrease* as thermal driving rises, and the
+      sweeps look physically backwards while the training metrics look fine.
+
+    The returned field is positive for melting and negative for refreezing,
+    which reproduces the observed area-mean melt of the large cold cavities to
+    within a few tens of per cent.
     """
     arr = np.asarray(melt, float)
     if "kg" in units.lower():
-        return arr / CONST.rho_i * CONST.sec_per_year
+        return -arr / CONST.rho_i * CONST.sec_per_year
     return arr
+
+
+def check_melt_sign(melt: np.ndarray, mask: np.ndarray, name: str = "") -> None:
+    """Warn if a converted melt field looks sign-inverted.
+
+    Antarctic ice shelves melt on average, so an area-mean that comes out
+    negative over a whole cavity almost certainly means the sign convention was
+    misread.  Reported rather than raised, because a genuinely refreezing-
+    dominated cavity is possible.
+    """
+    values = np.asarray(melt, float)[np.asarray(mask, bool)]
+    values = values[np.isfinite(values)]
+    if values.size and values.mean() < 0:
+        print(f"  warning: {name} has negative area-mean melt "
+              f"({values.mean():.2f} m/yr); check the sign convention", flush=True)
 
 
 def shelf_index(masks_path: Path) -> dict[str, int]:
