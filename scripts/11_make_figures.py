@@ -39,6 +39,22 @@ ARCH_LABEL = {"mlp": "MLP (no spatial coupling)", "gcn": "GCN",
 ARCH_ORDER = ("mlp", "gcn", "gat", "egcn")
 SCENARIO_LABEL = {"SMITH_bf663": "REPEAT1970", "SMITH_bi646": "4$\\times$CO$_2$"}
 
+#: Readable axis names for the input features.  The raw keys are the column
+#: names of the feature table and are not fit to print.
+FEATURE_LABEL = {
+    "T": "Temperature",
+    "S": "Salinity",
+    "thermal_driving": "Thermal driving",
+    "ice_draft": "Ice draft",
+    "water_column": "Water-column thickness",
+    "bed_depth": "Bed depth",
+    "slope_ice": "Ice-draft slope",
+    "slope_bed": "Bed slope",
+    "dist_gl": "Distance to grounding line",
+    "dist_front": "Distance to front",
+    "coriolis": "Coriolis parameter",
+}
+
 
 def load(path: Path):
     try:
@@ -266,7 +282,7 @@ def figure_controls(controls: dict, path: Path) -> list[str]:
         ax.barh(y + (j - 0.5) * 0.38, vals, height=0.34, color=st.CATEGORICAL[j],
                 label=SCENARIO_LABEL.get(sim, sim), zorder=3)
     ax.set_yticks(y)
-    ax.set_yticklabels(features, fontsize=5.8)
+    ax.set_yticklabels([FEATURE_LABEL.get(f, f) for f in features], fontsize=5.8)
     ax.set_xlabel("Melt response per unit perturbation (m yr$^{-1}$)")
     ax.axvline(0.0, color=st.INK["primary"], lw=0.8)
     ax.legend(fontsize=5.8)
@@ -284,7 +300,8 @@ def figure_controls(controls: dict, path: Path) -> list[str]:
         colours = [st.REGIME["warm"] if v > 0 else st.REGIME["cold"] for v in vals]
         ax.barh(np.arange(len(names)), vals, color=colours, zorder=3)
         ax.set_yticks(np.arange(len(names)))
-        ax.set_yticklabels(names, fontsize=5.8)
+        ax.set_yticklabels([FEATURE_LABEL.get(k, k) for k in names],
+                           fontsize=5.8)
         ax.axvline(0.0, color=st.INK["primary"], lw=0.8)
         ax.set_xlabel("Change in sensitivity, 4$\\times$CO$_2$ minus REPEAT1970")
 
