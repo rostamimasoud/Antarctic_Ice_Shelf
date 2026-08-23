@@ -51,6 +51,14 @@ from aisgnn.config import (                                        # noqa: E402
 from aisgnn.dynsys.ews import indicator_sensitivity                # noqa: E402
 from aisgnn.viz import style as st                                 # noqa: E402
 
+#: Architecture order, labels and split order follow 11_make_figures.py, so a
+#: reader moving between main Fig. 2 and this figure sees the same hues in the
+#: same sequence.
+ARCH_LABEL = {"mlp": "MLP (no spatial coupling)", "gcn": "GCN",
+              "gat": "GAT", "egcn": "Edge-conditioned"}
+ARCH_ORDER = ("mlp", "gcn", "gat", "egcn")
+SPLIT_ORDER = ("shelf", "year", "scenario")
+
 #: Cavities shown in the two-parameter map and the sensitivity panel.
 MAP_CAVITIES = ("Filchner-Ronne", "Ross", "Amery", "Pine Island")
 SENSITIVITY_CAVITY = "Ross"
@@ -157,19 +165,33 @@ def compute_ews_sensitivity(params: dict, outdir: Path) -> dict:
     x0 = model.equilibrium(obs.regime)
     years = 4000.0
 
+    # Stop the ramp clearly short of the fold rather than just above it.  Close
+    # to a saddle-node the state slides rapidly along the branch, and that
+    # excursion is the transition beginning, not a warning of it.  Leaving it in
+    # both dominates the plotted range and inflates the variance and
+    # autocorrelation trends the panel is meant to test, so the indicators would
+    # be measuring the event they are supposed to anticipate.
+    approach = 1.25
+    stop_at = target * approach
+
     def forcing(t: float) -> dict:
         frac = min(max(t / years, 0.0), 1.0)
-        return {"sigma": obs.sigma + frac * (target * 1.02 - obs.sigma)}
+        return {"sigma": obs.sigma + frac * (stop_at - obs.sigma)}
 
     t, X = model.integrate(x0, years=years, n_out=3000, forcing=forcing,
                            noise=0.05, seed=0)
+
+    # Trim the tail as well, so the analysed segment is unambiguously pre-onset.
+    keep = int(0.97 * t.size)
+    t, X = t[:keep], X[:keep]
     series = X[:, 0]              # cavity temperature
 
     windows = (150, 250, 400, 600)
     bandwidths = (50, 100, 200, 400)
     grid = indicator_sensitivity(series, windows, bandwidths)
 
-    out = {"cavity": cavity, "sigma_start": obs.sigma, "sigma_target": target,
+    out = {"cavity": cavity, "sigma_start": obs.sigma, "sigma_target": stop_at,
+           "sigma_fold": target,
            "windows": list(windows), "bandwidths": list(bandwidths),
            "tau": {f"{w}|{b}": (None if not np.isfinite(v) else float(v))
                    for (w, b), v in grid.items()},
@@ -317,60 +339,96 @@ def fig_s4(data: dict, path: Path) -> list[str]:
 
 
 def fig_s5(skill: dict, train_dir: Path, path: Path) -> list[str]:
-    """Per-seed skill and training curves."""
+    """Per-run test error and the validation curves behind it.
+
+    Main text Fig. 2 shows five-seed means.  This figure shows the runs those
+    means are made of, which is the only way to see that the spread is set by
+    which cavity or period a seed held out rather than by initialisation.
+    """
     st.use_style()
-    fig, axes = plt.subplots(1, 2, figsize=(st.WIDTH_DOUBLE, 2.6))
+    fig, axes = plt.subplots(1, 2, figsize=(st.WIDTH_DOUBLE, 2.9))
 
     runs = [load(p) for p in sorted(train_dir.glob("*.json"))]
-    runs = [r for r in runs if r]
+    runs = [r for r in runs if r and "arch" in r and "test" in r]
 
-    ax = axes[0]
     if not runs:
-        unavailable(ax, "no training runs found")
-    else:
-        archs = sorted({r["arch"] for r in runs})
-        splits = sorted({r["split"] for r in runs})
-        colours = dict(zip(archs, st.categorical(len(archs))))
-        for i, split in enumerate(splits):
-            for k, arch in enumerate(archs):
-                vals = [r["test"]["rmse"] for r in runs
-                        if r["arch"] == arch and r["split"] == split]
-                if vals:
-                    xs = np.full(len(vals), i + (k - (len(archs) - 1) / 2) * 0.18)
-                    ax.plot(xs, vals, "o", ms=3.0, color=colours[arch],
-                            alpha=0.85, label=arch if i == 0 else None)
-        ax.set_xticks(range(len(splits)))
-        ax.set_xticklabels(splits)
-        ax.set_ylabel("Test RMSE (m yr$^{-1}$)")
-        ax.set_xlabel("Held-out dimension")
+        for ax in axes:
+            unavailable(ax, "no training runs found")
+        return st.save(fig, path)
 
-        ax.legend(fontsize=5.8)
-        st.soften_grid(ax)
+    archs = [a for a in ARCH_ORDER if any(r["arch"] == a for r in runs)]
+    splits = [sp for sp in SPLIT_ORDER if any(r["split"] == sp for r in runs)]
+    colours = dict(zip(ARCH_ORDER, st.categorical(len(ARCH_ORDER))))
+    offset = 0.72 / max(len(archs), 1)
+
+    # ----------------------------------------------------------------- #
+    # a: every run as its own point, grouped by held-out dimension
+    # ----------------------------------------------------------------- #
+    ax = axes[0]
+    for i, split in enumerate(splits):
+        for k, arch in enumerate(archs):
+            vals = [r["test"]["rmse"] for r in runs
+                    if r["arch"] == arch and r["split"] == split]
+            if not vals:
+                continue
+            x = i + (k - (len(archs) - 1) / 2) * offset
+            # Jitter within the column only, so the group centres stay readable.
+            xs = x + np.linspace(-0.055, 0.055, len(vals))
+            ax.plot(xs, vals, "o", ms=3.0, color=colours[arch], alpha=0.9,
+                    mec="white", mew=0.4, zorder=3)
+            ax.plot([x - 0.075, x + 0.075], [np.median(vals)] * 2,
+                    color=st.INK["primary"], lw=1.0, zorder=4)
+
+    # The baseline every run is trying to beat.  It is drawn per split rather
+    # than as one line: each held-out dimension leaves out a different set of
+    # cavities and years, so the per-shelf-mean error it has to beat differs,
+    # and a single averaged line would flatter the hard splits.
+    for i, split in enumerate(splits):
+        base = [r["test"].get("rmse_baseline_shelfmean") for r in runs
+                if r["split"] == split]
+        base = [b for b in base if b is not None]
+        if not base:
+            continue
+        ax.plot([i - 0.45, i + 0.45], [np.mean(base)] * 2,
+                color=st.INK["primary"], lw=1.0, ls=(0, (3, 2)), zorder=2)
+
+    ax.set_xticks(range(len(splits)))
+    ax.set_xticklabels(splits)
+    ax.set_xlim(-0.5, len(splits) - 0.5)
+    ax.set_xlabel("Held-out dimension")
+    ax.set_ylabel("Test RMSE (m yr$^{-1}$)")
+    st.soften_grid(ax)
     st.panel_label(ax, "a")
 
+    # ----------------------------------------------------------------- #
+    # b: validation curves for the shelf split
+    # ----------------------------------------------------------------- #
     ax = axes[1]
     curves = [r for r in runs if r.get("history") and r["split"] == "shelf"]
     if not curves:
         unavailable(ax, "no training histories found")
     else:
-        archs = sorted({r["arch"] for r in curves})
-        colours = dict(zip(archs, st.categorical(len(archs))))
         for arch in archs:
             for r in [c for c in curves if c["arch"] == arch][:2]:
                 hist = r["history"]
                 ax.plot([h["epoch"] for h in hist], [h["rmse"] for h in hist],
-                        color=colours[arch], lw=0.9, alpha=0.8,
-                        label=arch if r is [c for c in curves
-                                            if c["arch"] == arch][0] else None)
+                        color=colours[arch], lw=0.9, alpha=0.85)
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Validation RMSE (m yr$^{-1}$)")
-
-        handles = [Line2D([], [], color=colours[a], lw=1.2, label=a) for a in archs]
-        ax.legend(handles=handles, fontsize=5.8)
         st.soften_grid(ax)
     st.panel_label(ax, "b")
 
-    fig.tight_layout()
+    # One legend for both panels, below the axes, so neither is overplotted.
+    handles = [Line2D([], [], color=colours[a], marker="o", ls="-",
+                      lw=1.2, ms=3.5, label=ARCH_LABEL[a]) for a in archs]
+    handles += [Line2D([], [], color=st.INK["primary"], lw=1.0, ls=(0, (3, 2)),
+                       label="Per-shelf-mean baseline (a)"),
+                Line2D([], [], color=st.INK["primary"], lw=1.2,
+                       label="Median across seeds (a)")]
+    fig.legend(handles=handles, fontsize=5.8, loc="lower center",
+               ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.0))
+
+    fig.tight_layout(rect=(0, 0.12, 1, 1))
     return st.save(fig, path)
 
 
