@@ -240,7 +240,9 @@ def make_figure(cont_T: dict, cont_sigma: dict, rtip: dict, path: Path) -> list[
         rec = cont.get(cav)
         if rec and rec.get("ok"):
             draw_branch(ax, rec, xlabel)
-            ax.set_title(f"{cav}", fontsize=7.5)
+            ax.text(0.04, 0.93, cav, transform=ax.transAxes,
+                    fontsize=6.0, ha="left", va="top",
+                    color=st.INK["secondary"])
         st.panel_label(ax, letter)
 
     # Legend by proxy: identity is never colour-alone, so it is spelled out.
@@ -276,7 +278,6 @@ def make_figure(cont_T: dict, cont_sigma: dict, rtip: dict, path: Path) -> list[
         ax.text(0.5, 0.5, "no bistable cavities found", ha="center", va="center",
                 transform=ax.transAxes, color=st.INK["muted"], fontsize=6.5)
         ax.set_axis_off()
-    ax.set_title("Hysteresis in CDW temperature", fontsize=7.5)
     st.panel_label(ax, "c")
 
     # (d): rate-induced tipping boundary.
@@ -303,7 +304,6 @@ def make_figure(cont_T: dict, cont_sigma: dict, rtip: dict, path: Path) -> list[
                 va="center", transform=ax.transAxes, color=st.INK["muted"],
                 fontsize=6.5)
         ax.set_axis_off()
-    ax.set_title("Rate-induced tipping", fontsize=7.5)
     st.panel_label(ax, "d")
 
     return st.save(fig, path)

@@ -220,7 +220,8 @@ def fig_s2(cont: dict, path: Path) -> list[str]:
             ax.plot([f["p"]], [f["melt"]], "o", ms=3.0,
                     color=st.INK["primary"], mec=st.INK["surface"], mew=0.5)
         ax.axvline(rec["present_day"], color=st.INK["muted"], lw=0.6, ls=(0, (1, 2)))
-        ax.set_title(cavity, fontsize=6.5)
+        ax.text(0.04, 0.93, cavity, transform=ax.transAxes, fontsize=5.8,
+                ha="left", va="top", color=st.INK["secondary"])
         st.soften_grid(ax)
 
     for ax in axes[len(names):]:
@@ -271,7 +272,8 @@ def fig_s3(data: dict, path: Path) -> list[str]:
         ax.plot([rec["present"]["sigma"]], [rec["present"]["T_cdw"]],
                 marker="*", ms=7, color=st.INK["primary"],
                 mec=st.INK["surface"], mew=0.6)
-        ax.set_title(cavity, fontsize=6.5)
+        ax.text(0.04, 0.94, cavity, transform=ax.transAxes, fontsize=5.8,
+                ha="left", va="top", color=st.INK["primary"])
         ax.set_xlabel("$\\Sigma$ (m yr$^{-1}$)")
     axes[0].set_ylabel("$T_{\\mathrm{CDW}}$ ($^\\circ$C)")
 
@@ -308,8 +310,6 @@ def fig_s4(data: dict, path: Path) -> list[str]:
     ax.set_xticklabels([f"{f:g}" for f in factors])
     ax.set_xlabel("Multiple of the calibrated value")
     ax.set_ylabel("Hysteresis width $\\Delta\\Sigma$ (m yr$^{-1}$)")
-    ax.set_title(f"{data['cavity']}: missing points are parameter values\n"
-                 f"for which no bistable window exists", fontsize=6.0)
     ax.legend(fontsize=5.6)
     st.soften_grid(ax)
     fig.tight_layout()
@@ -343,7 +343,7 @@ def fig_s5(skill: dict, train_dir: Path, path: Path) -> list[str]:
         ax.set_xticklabels(splits)
         ax.set_ylabel("Test RMSE (m yr$^{-1}$)")
         ax.set_xlabel("Held-out dimension")
-        ax.set_title("individual seeds", fontsize=6.5)
+
         ax.legend(fontsize=5.8)
         st.soften_grid(ax)
     st.panel_label(ax, "a")
@@ -364,7 +364,7 @@ def fig_s5(skill: dict, train_dir: Path, path: Path) -> list[str]:
                                             if c["arch"] == arch][0] else None)
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Validation RMSE (m yr$^{-1}$)")
-        ax.set_title("shelf split, two seeds per architecture", fontsize=6.5)
+
         handles = [Line2D([], [], color=colours[a], lw=1.2, label=a) for a in archs]
         ax.legend(handles=handles, fontsize=5.8)
         st.soften_grid(ax)
@@ -388,9 +388,6 @@ def fig_s6(data: dict, path: Path) -> list[str]:
     ax.plot(data["time"], data["series"], color=st.REGIME["cold"], lw=0.6)
     ax.set_xlabel("Time (yr)")
     ax.set_ylabel("Cavity temperature ($^\\circ$C)")
-    ax.set_title(f"{data['cavity']}: $\\Sigma$ ramped "
-                 f"{data['sigma_start']:.0f}$\\to${data['sigma_target']:.1f}"
-                 f" m yr$^{{-1}}$", fontsize=6.5)
     st.soften_grid(ax)
     st.panel_label(ax, "a")
 
@@ -413,7 +410,7 @@ def fig_s6(data: dict, path: Path) -> list[str]:
     ax.set_yticklabels(bandwidths)
     ax.set_xlabel("Rolling window (samples)")
     ax.set_ylabel("Detrending bandwidth (samples)")
-    ax.set_title("Kendall $\\tau$ of the variance trend", fontsize=6.5)
+
     for j in range(grid.shape[0]):
         for i in range(grid.shape[1]):
             if np.isfinite(grid[j, i]):

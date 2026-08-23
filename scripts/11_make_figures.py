@@ -60,8 +60,15 @@ def unavailable(ax, message: str) -> None:
 # --------------------------------------------------------------------------- #
 
 def figure_skill(skill: dict, path: Path) -> list[str]:
+    """Emulator skill by architecture and held-out dimension.
+
+    The legend is a single shared one placed above both panels.  Inside the axes
+    it unavoidably sits on top of the bars -- the tallest group is at the left,
+    where a legend would naturally go -- and its baseline entry collided with the
+    baseline line itself.
+    """
     st.use_style()
-    fig, axes = plt.subplots(1, 2, figsize=(st.WIDTH_DOUBLE, 2.6))
+    fig, axes = plt.subplots(1, 2, figsize=(st.WIDTH_DOUBLE, 2.9))
 
     if not skill or not skill.get("by_arch_split"):
         for ax in axes:
@@ -69,15 +76,19 @@ def figure_skill(skill: dict, path: Path) -> list[str]:
         return st.save(fig, path)
 
     rows = skill["by_arch_split"]
-    splits = sorted({v["split"] for v in rows.values()})
+    # Ordered easiest to hardest, which is the order the text discusses them in;
+    # sorting alphabetically would put the hardest case first.
+    order = [sp for sp in ("shelf", "year", "scenario")
+             if any(v["split"] == sp for v in rows.values())]
     colours = dict(zip(ARCH_ORDER, st.categorical(len(ARCH_ORDER))))
-
-    # (a) RMSE by architecture and split, against the per-shelf-mean baseline.
-    ax = axes[0]
     width = 0.8 / max(len(ARCH_ORDER), 1)
+    ekw = dict(ecolor=st.INK["secondary"], capsize=1.2, elinewidth=0.7)
+
+    # (a) RMSE against the per-shelf-mean baseline.
+    ax = axes[0]
     for k, arch in enumerate(ARCH_ORDER):
         xs, ys, es = [], [], []
-        for i, split in enumerate(splits):
+        for i, split in enumerate(order):
             rec = rows.get(f"{arch}_{split}")
             if rec is None:
                 continue
@@ -86,31 +97,28 @@ def figure_skill(skill: dict, path: Path) -> list[str]:
             es.append(rec["rmse_std"])
         if xs:
             ax.bar(xs, ys, width=width * 0.9, yerr=es, color=colours[arch],
-                   label=ARCH_LABEL[arch], zorder=3)
+                   label=ARCH_LABEL[arch], zorder=3, error_kw=ekw)
 
-    for i, split in enumerate(splits):
+    for i, split in enumerate(order):
         recs = [v for v in rows.values() if v["split"] == split]
         if recs:
             base = np.nanmean([r["baseline_rmse"] for r in recs])
             ax.plot([i - 0.45, i + 0.45], [base, base], color=st.INK["primary"],
-                    lw=1.0, ls=(0, (3, 2)), zorder=4)
+                    lw=1.1, ls=(0, (3, 2)), zorder=5,
+                    label="Per-shelf-mean baseline" if i == 0 else None)
 
-    ax.set_xticks(range(len(splits)))
-    ax.set_xticklabels(splits)
+    ax.set_xticks(range(len(order)))
+    ax.set_xticklabels(order)
     ax.set_ylabel("Test RMSE (m yr$^{-1}$)")
     ax.set_xlabel("Held-out dimension")
-    handles, labels = ax.get_legend_handles_labels()
-    handles.append(Line2D([], [], color=st.INK["primary"], lw=1.0, ls=(0, (3, 2))))
-    labels.append("Per-shelf-mean baseline")
-    ax.legend(handles, labels, fontsize=5.6, loc="upper left", ncol=1)
     st.soften_grid(ax)
     st.panel_label(ax, "a")
 
-    # (b) skill relative to the baseline: positive means genuinely spatial skill.
+    # (b) Median skill relative to that baseline.
     ax = axes[1]
     for k, arch in enumerate(ARCH_ORDER):
         xs, ys, es = [], [], []
-        for i, split in enumerate(splits):
+        for i, split in enumerate(order):
             rec = rows.get(f"{arch}_{split}")
             if rec is None or not np.isfinite(rec.get("skill_median", np.nan)):
                 continue
@@ -119,18 +127,21 @@ def figure_skill(skill: dict, path: Path) -> list[str]:
             es.append(rec.get("skill_iqr", 0.0) / 2.0)
         if xs:
             ax.bar(xs, ys, width=width * 0.9, yerr=es, color=colours[arch],
-                   zorder=3)
-    ax.axhline(0.0, color=st.INK["primary"], lw=0.8)
-    ax.set_xticks(range(len(splits)))
-    ax.set_xticklabels(splits)
-    ax.set_ylabel("Skill vs. baseline (median over seeds)")
+                   zorder=3, error_kw=ekw)
+
+    ax.axhline(0.0, color=st.INK["primary"], lw=0.8, zorder=4)
+    ax.set_xticks(range(len(order)))
+    ax.set_xticklabels(order)
+    ax.set_ylabel("Skill vs. baseline")
     ax.set_xlabel("Held-out dimension")
-    ax.set_title("positive = beats predicting the shelf mean; bars are the IQR",
-                 fontsize=6.5)
     st.soften_grid(ax)
     st.panel_label(ax, "b")
 
-    fig.tight_layout()
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=5, frameon=False,
+               fontsize=6.0, bbox_to_anchor=(0.5, -0.02),
+               handlelength=1.6, columnspacing=1.4)
+    fig.tight_layout(rect=(0, 0.085, 1, 1))
     return st.save(fig, path)
 
 
@@ -202,7 +213,8 @@ def figure_connectivity(conn: list, path: Path) -> list[str]:
         ax.set_yticks(y)
         ax.set_yticklabels(shelves, fontsize=6.0)
         ax.set_xlabel("Connectivity length scale (km)")
-        ax.set_title(f"{ARCH_LABEL[arch]}", fontsize=6.5)
+        ax.text(0.97, 0.04, ARCH_LABEL[arch], transform=ax.transAxes,
+                fontsize=5.8, ha="right", va="bottom", color=st.INK["secondary"])
         handles = [Line2D([], [], color=st.CATEGORICAL[j], lw=4,
                           label=SCENARIO_LABEL.get(sim, sim))
                    for j, sim in enumerate(("SMITH_bf663", "SMITH_bi646"))]
@@ -271,7 +283,7 @@ def figure_controls(controls: dict, path: Path) -> list[str]:
         ax.set_yticklabels(names, fontsize=5.8)
         ax.axvline(0.0, color=st.INK["primary"], lw=0.8)
         ax.set_xlabel("Change in sensitivity, 4$\\times$CO$_2$ minus REPEAT1970")
-        ax.set_title("positive = gains influence under warming", fontsize=6.5)
+
         st.soften_grid(ax, axis="x")
     st.panel_label(ax, "b")
 
@@ -305,7 +317,7 @@ def figure_response(response: list, ice: dict, path: Path) -> list[str]:
         ax.set_xlabel("Thermal-driving offset ($^\\circ$C)")
         ax.set_ylabel("Area-mean melt (m yr$^{-1}$)")
         ax.legend(fontsize=5.5)
-        ax.set_title("Open loop: no memory", fontsize=6.5)
+
         st.soften_grid(ax)
     st.panel_label(ax, "a")
 
@@ -326,9 +338,13 @@ def figure_response(response: list, ice: dict, path: Path) -> list[str]:
                 ls=(0, (4, 2)), label="Reverse")
         ax.set_xlabel("Thermal-driving offset ($^\\circ$C)")
         ax.set_ylabel("Area-mean melt (m yr$^{-1}$)")
-        ax.set_title(f"{r['shelf']}: loop width {cl['width']:.2f} m yr$^{{-1}}$ "
-                     f"(gain {cl.get('loop_gain', float('nan')):.2f})",
-                     fontsize=6.5)
+
+        # The numbers go in the corner rather than the title, which at this
+        # width ran under the next panel's label.
+        ax.text(0.03, 0.95, f"width {cl['width']:.2f} m yr$^{{-1}}$\n"
+                            f"gain {cl.get('loop_gain', float('nan')):.2f}",
+                transform=ax.transAxes, fontsize=5.6, va="top", ha="left",
+                color=st.INK["secondary"])
         ax.legend(fontsize=5.8)
         st.soften_grid(ax)
     st.panel_label(ax, "b")
@@ -348,7 +364,8 @@ def figure_response(response: list, ice: dict, path: Path) -> list[str]:
                         color=colour, lw=1.3, label=label)
         ax.set_xlabel("Time (yr)")
         ax.set_ylabel("Grounding-line position (km)")
-        ax.set_title(f"{bed} bed", fontsize=6.5)
+        ax.text(0.03, 0.04, f"{bed} bed", transform=ax.transAxes,
+                fontsize=5.8, ha="left", va="bottom", color=st.INK["secondary"])
         ax.legend(fontsize=5.8)
         st.soften_grid(ax)
     st.panel_label(ax, "c")

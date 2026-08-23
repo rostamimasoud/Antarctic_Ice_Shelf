@@ -100,7 +100,9 @@ WIDTH_DOUBLE = 7.20    # 183 mm
 
 RC = {
     "figure.dpi": 150,
-    "savefig.dpi": 400,
+    # Nature: 300 dpi halftone, 600 combination, 1000-1200 line art.
+    # PDF output is vector so unaffected; this governs the PNG copies.
+    "savefig.dpi": 600,
     "savefig.bbox": "tight",
     "savefig.pad_inches": 0.02,
     "savefig.facecolor": INK["surface"],
