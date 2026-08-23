@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..config import RAW_DIR, SIMULATIONS
+from ..config import CONST, RAW_DIR, SIMULATIONS
 
 # --------------------------------------------------------------------------- #
 # Variable-name resolution
@@ -127,7 +127,12 @@ class NemoFiles:
     melt: Path | None = None
 
     def complete(self) -> bool:
-        return all(p is not None for p in (self.masks, self.geometry, self.ts_fields))
+        """Masks and T/S are required; the slope file is not.
+
+        Slopes are derived from the draft and bathymetry, because the archived
+        slope files exist for the REPEAT1970 run but not for 4xCO2.
+        """
+        return self.masks is not None and self.ts_fields is not None
 
     def missing(self) -> list[str]:
         return [k for k in ("masks", "geometry", "ts_fields", "melt")
@@ -195,35 +200,22 @@ def available_simulations(root: Path | None = None,
     return sorted(p.name for p in base.iterdir() if p.is_dir())
 
 
-def find_geometry(simulation: str, root: Path | None = None) -> Path | None:
-    """Locate the corrected draft and bathymetry file for a simulation.
-
-    These live under the 2022 release in a per-simulation directory named after
-    the full NEMO configuration, and on a different grid from everything else
-    (1334x1334 rather than 1200x1200), so they must be regridded onto the mask
-    grid before the fields can be combined.
-    """
-    root = Path(root) if root is not None else RAW_DIR
-    base = root / "burgard2022" / "interim"
-    if not base.is_dir():
-        return None
-    for directory in sorted(base.glob(f"NEMO_*{simulation}*")):
-        candidate = directory / "corrected_draft_bathy_isf.nc"
-        if candidate.is_file():
-            return candidate
-    return None
-
-
 def find_melt(simulation: str, root: Path | None = None) -> Path | None:
     """Locate the reference NEMO melt field for a simulation.
 
-    The ``melt_rates_2D_NEMO*`` files are the ocean model's own melt and are the
-    emulator's target.  The ``melt_rates_2D_boxes`` and ``_plumes`` files sitting
-    beside them hold melt produced by PICO-style *parameterisations*; training on
-    those would teach the emulator to reproduce a parameterisation rather than
-    the simulation, so the NEMO files are matched first and explicitly.
+    The ``melt_rates_2D_NEMO`` and ``cavity_melt_allyy`` files are the ocean
+    model's own melt and are the emulator's target.  The ``melt_rates_2D_boxes``
+    and ``_plumes`` files sitting beside them hold melt produced by PICO-style
+    *parameterisations*; training on those would teach the emulator to reproduce
+    a parameterisation rather than the simulation, so the reference files are
+    matched first and explicitly.
     """
     root = Path(root) if root is not None else RAW_DIR
+
+    smith = root / "burgard2023" / "interim" / simulation / "cavity_melt_allyy_Ant_stereo.nc"
+    if smith.is_file():
+        return smith
+
     for base, patterns in (
         (root / "burgard2022" / "processed" / "MELT_RATE",
          (f"nemo_5km_{simulation}/melt_rates_2D_NEMO_timmean.nc",
@@ -239,6 +231,93 @@ def find_melt(simulation: str, root: Path | None = None) -> Path | None:
             if hits:
                 return hits[0]
     return None
+
+
+def find_geometry(simulation: str, root: Path | None = None) -> Path | None:
+    """Locate the corrected draft and bathymetry file for a simulation.
+
+    The SMITH runs carry a time-varying geometry alongside their melt; the OPM
+    runs carry a static one under the 2022 release.  Both are on a 1334-square
+    grid rather than the 1200-square mask grid and must be aligned before use.
+    """
+    root = Path(root) if root is not None else RAW_DIR
+
+    smith = root / "burgard2023" / "interim" / simulation / "corrected_draft_bathy_isf.nc"
+    if smith.is_file():
+        return smith
+
+    base = root / "burgard2022" / "interim"
+    if base.is_dir():
+        for directory in sorted(base.glob(f"NEMO_*{simulation}*")):
+            candidate = directory / "corrected_draft_bathy_isf.nc"
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def decode_years(time_values: np.ndarray) -> np.ndarray:
+    """Extract calendar years from the archives' two time conventions.
+
+    Melt files store ``day as %Y%m%d.%f`` (so ``19700101.5``), while the geometry
+    files store the year directly.  Both appear as bare floats with no calendar
+    attached, so they are distinguished by magnitude rather than by metadata.
+    """
+    t = np.asarray(time_values, float)
+    return np.where(t > 1e6, t // 10000, t).astype(int)
+
+
+def select_year(dataset, year: int, dim: str = "time",
+                base_year: int | None = None):
+    """Select one calendar year from a dataset with an undecoded time axis.
+
+    The melt archives declare ``day as %Y%m%d.%f`` but store all-zero time
+    values, so the coordinate cannot be decoded.  When the axis is degenerate
+    the record is located positionally instead, anchored at ``base_year``; the
+    melt and geometry files of a run have one record per year over the same
+    span, so index ``year - base_year`` is the right one.  Without this the
+    selection silently fails for every year.
+    """
+    if dim not in dataset.dims:
+        return dataset
+
+    years = decode_years(dataset[dim].values)
+    if np.ptp(years) > 0:
+        matches = np.flatnonzero(years == year)
+        if matches.size:
+            return dataset.isel({dim: int(matches[0])})
+        raise KeyError(f"year {year} not in {years.min()}-{years.max()}")
+
+    if base_year is None:
+        raise KeyError(f"time axis is degenerate and no base_year was given "
+                       f"to locate {year}")
+    idx = year - base_year
+    n = dataset.sizes[dim]
+    if not 0 <= idx < n:
+        raise KeyError(f"year {year} maps to index {idx}, outside 0-{n - 1} "
+                       f"(base {base_year})")
+    return dataset.isel({dim: idx})
+
+
+def first_year(dataset, dim: str = "time") -> int | None:
+    """First calendar year of a dataset whose time axis is decodable."""
+    if dim not in dataset.dims:
+        return None
+    years = decode_years(dataset[dim].values)
+    return int(years.min()) if np.ptp(years) > 0 else None
+
+
+def melt_to_m_per_year(melt: np.ndarray, units: str = "") -> np.ndarray:
+    """Convert an archived melt field to metres of ice per year.
+
+    The SMITH files store a mass flux in kg/m2/s; the OPM files already store
+    m/yr.  Converting the wrong one would rescale the emulator's entire target
+    by a factor of about 3.4e-5 without changing anything that would look wrong
+    in a loss curve.
+    """
+    arr = np.asarray(melt, float)
+    if "kg" in units.lower():
+        return arr / CONST.rho_i * CONST.sec_per_year
+    return arr
 
 
 def shelf_index(masks_path: Path) -> dict[str, int]:

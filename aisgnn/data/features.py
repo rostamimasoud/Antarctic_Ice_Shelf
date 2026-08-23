@@ -85,8 +85,23 @@ def clean(field: np.ndarray, mask: np.ndarray, name: str,
     return field
 
 
-def assemble(raw: dict, mask: np.ndarray, latitude: np.ndarray
-             ) -> tuple[dict, dict]:
+def gradient_magnitude(field: np.ndarray, spacing: float = 5000.0) -> np.ndarray:
+    """Magnitude of the horizontal gradient of a gridded field.
+
+    Slopes are computed here rather than read from the archived
+    ``slope_info_bedrock_draft`` files, which exist for the REPEAT1970 run but
+    not for 4xCO2.  Deriving them from the per-year draft and bathymetry keeps
+    both scenarios available and guarantees the slope belongs to the same year
+    and run as everything else in the graph.
+    """
+    arr = np.asarray(field, float)
+    filled = np.where(np.isfinite(arr), arr, np.nanmedian(arr))
+    dy, dx = np.gradient(filled, spacing, spacing)
+    return np.hypot(dx, dy)
+
+
+def assemble(raw: dict, mask: np.ndarray, latitude: np.ndarray,
+             spacing: float = 5000.0) -> tuple[dict, dict]:
     """Build the canonical node features from raw archived arrays.
 
     Parameters
@@ -94,10 +109,11 @@ def assemble(raw: dict, mask: np.ndarray, latitude: np.ndarray
     raw
         Arrays keyed by archived name: ``theta_in``, ``salinity_in``,
         ``thermal_forcing``, ``corrected_isfdraft``, ``corrected_isf_bathy``,
-        ``slope_ice_lon``/``lat``, ``slope_bed_lon``/``lat``, ``dGL``, ``dIF``,
-        ``entry_depth_max``.
+        ``dGL`` and ``dIF``.
     mask
         Cavity cells for the shelf being assembled.
+    spacing
+        Grid spacing in metres, used for the slope gradients.
 
     Returns
     -------
@@ -115,12 +131,11 @@ def assemble(raw: dict, mask: np.ndarray, latitude: np.ndarray
         "ice_draft": as_depth(draft),
         "bed_depth": as_depth(bathy),
         "water_column": water_column(bathy, draft),
-        "slope_ice": slope_magnitude(raw["slope_ice_lon"], raw["slope_ice_lat"]),
-        "slope_bed": slope_magnitude(raw["slope_bed_lon"], raw["slope_bed_lat"]),
+        "slope_ice": gradient_magnitude(draft, spacing),
+        "slope_bed": gradient_magnitude(bathy, spacing),
         "dist_gl": raw["dGL"],
         "dist_front": raw["dIF"],
         "coriolis": coriolis(latitude),
-        "entry_depth": as_depth(raw["entry_depth_max"]),
     }
 
     missing = [f for f in NODE_FEATURES if f not in fields]

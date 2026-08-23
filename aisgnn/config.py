@@ -201,8 +201,10 @@ NEMO_TRAIN = (
 
 #: Smith et al. (2021) HadGEM3-forced NEMO runs used as the independent test set.
 NEMO_TEST = (
-    Simulation("bf663", "REPEAT1970", "repeat1970", "nemo", "pre-industrial-like forcing"),
-    Simulation("bi646", "4xCO2", "4xCO2", "nemo", "abrupt quadrupled CO2"),
+    Simulation("SMITH_bf663", "REPEAT1970", "repeat1970", "nemo",
+               "pre-industrial-like forcing, 1970-2072"),
+    Simulation("SMITH_bi646", "4xCO2", "4xCO2", "nemo",
+               "abrupt quadrupled CO2, 1970-2041"),
 )
 
 SIMULATIONS = {s.key: s for s in NEMO_TRAIN + NEMO_TEST}
@@ -253,7 +255,11 @@ SMOKE_TEST_SHELVES = ("Filchner-Ronne", "Ross", "Getz", "Pine Island", "Thwaites
 #: This list is what the published archives actually contain, which is less than
 #: the research plan assumed.  The NEMO ensembles distribute temperature,
 #: salinity, thermal forcing and geometry at the ice draft, but **no horizontal
-#: velocity, mixed-layer depth or in-cavity stratification**.  Any hypothesis
+#: velocity, mixed-layer depth or in-cavity stratification**.  The archived
+#: slope fields are also absent for the 4xCO2 run, so ``slope_ice`` and
+#: ``slope_bed`` are computed from the per-year draft and bathymetry instead of
+#: read from file; that keeps every feature available for both scenarios and
+#: self-consistent within each.  Any hypothesis
 #: about a shift from thermal-driving control to circulation control therefore
 #: cannot be tested on these fields directly; stratification has to come from
 #: the separately archived continental-shelf T/S profiles (see
@@ -270,7 +276,6 @@ NODE_FEATURES = (
     "dist_gl",        # distance to the grounding line, m
     "dist_front",     # distance to the ice-shelf front, m
     "coriolis",       # f = 2 Omega sin(lat), 1/s
-    "entry_depth",    # deepest depth at which water can enter the cavity, m
 )
 
 #: Derived from the archived continental-shelf profiles, appended when available.

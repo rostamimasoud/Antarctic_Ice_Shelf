@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
-"""Build per-shelf cavity graphs from the NEMO archives.
+"""Build per-shelf, per-year cavity graphs from the NEMO archives.
 
-Combines the four archived pieces -- masks and distances, slope geometry,
-temperature and salinity at the ice draft, and the reference NEMO melt -- into
-one graph per ice shelf, and writes them to ``data/graphs``.
+Everything for one graph comes from a single simulation and a single year:
+masks, distances and slope geometry, temperature and salinity at the ice draft,
+the time-varying draft and bathymetry, and the reference melt.  Mixing sources
+would be easy here and quietly wrong -- an earlier version paired melt from one
+run with temperature from another, which is not a prediction problem the ocean
+model ever poses.
 
-The reference melt is ``melt_rates_2D_NEMO*.nc``, not the ``melt_rates_2D_boxes``
-or ``_plumes`` files in the same directory: those hold parameterised melt from
-PICO-style schemes, and training an emulator on them would reproduce a
-parameterisation rather than the ocean model.
+Two archive conventions are reconciled:
+
+* melt is stored as a mass flux in kg/m2/s for the SMITH runs and as m/yr for
+  the OPM runs, so it is converted explicitly rather than assumed;
+* melt and geometry are on a 1334-square grid while masks and T/S are on a
+  1200-square grid, both the same 5 km polar-stereographic grid aligned on the
+  same offsets, so the two are reconciled by exact coordinate selection.
 
 Examples
 --------
     python scripts/02_build_graphs.py --dry-run
-    python scripts/02_build_graphs.py --shelves Filchner-Ronne Ross
-    python scripts/02_build_graphs.py --simulation OPM021 --radius 12000
+    python scripts/02_build_graphs.py --simulation SMITH_bf663 --years 1990 2000
+    python scripts/02_build_graphs.py --all-scenarios --every 5
 """
 
 from __future__ import annotations
@@ -41,157 +47,179 @@ from aisgnn.data.features import align_to, assemble                # noqa: E402
 from aisgnn.data.graph import build_graph                          # noqa: E402
 from aisgnn.data.nemo import (                                     # noqa: E402
     discover,
+    first_year,
     find_geometry,
     find_melt,
     get,
     match_shelf,
+    melt_to_m_per_year,
     open_dataset,
     resolve,
+    scenario_of,
+    select_year,
     shelf_index,
 )
 
-#: 5 km grid, so this reaches roughly two cells in each direction.
-DEFAULT_RADIUS = 12_000.0
+DEFAULT_RADIUS = 12_000.0        # 5 km grid, so roughly two cells each way
+CELL_AREA = 25.0e6               # m2
+
+#: The two SMITH runs give the scenario contrast the analysis needs.
+SCENARIO_RUNS = ("SMITH_bf663", "SMITH_bi646")
 
 
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def build_for_simulation(simulation: str, mask_simulation: str, year: int,
-                         shelves: list[str], radius: float, root: Path,
-                         outdir: Path, dry_run: bool) -> dict:
-    """Build graphs for every requested shelf of one simulation."""
-    index = discover(mask_simulation, root=root)
-    if year not in index:
-        raise SystemExit(f"{mask_simulation}: year {year} not indexed; "
-                         f"available {sorted(index)[:5]}...")
-    files = index[year]
-
-    geom_path = find_geometry(simulation, root=root)
-    melt_path = find_melt(simulation, root=root)
-    if geom_path is None or melt_path is None:
-        raise SystemExit(f"{simulation}: geometry={geom_path} melt={melt_path}")
-
-    log(f"masks    {files.masks.name}")
-    log(f"slopes   {files.geometry.name}")
-    log(f"T/S      {files.ts_fields.name}")
-    log(f"geometry {geom_path.parent.name}/{geom_path.name}")
-    log(f"melt     {melt_path.parent.name}/{melt_path.name}")
-
-    summary: dict[str, dict] = {}
-
-    with open_dataset(files.masks) as dm, \
-         open_dataset(files.geometry) as dslope, \
-         open_dataset(files.ts_fields) as dts, \
-         open_dataset(geom_path) as dgeom, \
-         open_dataset(melt_path) as dmelt:
+def build_year(simulation: str, year: int, shelves: list[str], radius: float,
+               root: Path, outdir: Path, dry_run: bool,
+               handles: dict) -> dict:
+    """Build every requested shelf for one simulation-year."""
+    files = handles["index"][year]
+    with open_dataset(files.masks) as dm, open_dataset(files.ts_fields) as dts:
 
         target_x, target_y = dm.x.values, dm.y.values
-        geom = align_to(dgeom, target_x, target_y)
+        xg, yg = np.meshgrid(target_x, target_y)
 
         isf = get(dm, "isf_mask")
         lat = get(dm, "latitude")
-        xg, yg = np.meshgrid(target_x, target_y)
 
-        melt = np.asarray(dmelt[resolve(dmelt, "melt_rate")].values)
-        while melt.ndim > 2:                 # collapse time / parameter axes
-            melt = np.nanmean(melt, axis=0)
+        base = handles["base_year"]
+        geom = align_to(select_year(handles["geom"], year, base_year=base),
+                        target_x, target_y)
+        melt_ds = select_year(handles["melt"], year, base_year=base)
+        melt_name = resolve(melt_ds, "melt_rate")
+        melt_units = getattr(melt_ds[melt_name], "units", "")
+        melt = align_to(melt_ds, target_x, target_y)[melt_name].values
+        melt = melt_to_m_per_year(np.squeeze(melt), melt_units)
 
         raw = {
             "theta_in": get(dts, "T"),
             "salinity_in": get(dts, "S"),
             "thermal_forcing": get(dts, "thermal_driving"),
-            "corrected_isfdraft": np.asarray(geom["corrected_isfdraft"].values),
-            "corrected_isf_bathy": np.asarray(geom["corrected_isf_bathy"].values),
-            "slope_ice_lon": get(dslope, "slope_ice_lon"),
-            "slope_ice_lat": get(dslope, "slope_ice_lat"),
-            "slope_bed_lon": get(dslope, "slope_bed_lon"),
-            "slope_bed_lat": get(dslope, "slope_bed_lat"),
+            "corrected_isfdraft": np.squeeze(geom["corrected_isfdraft"].values),
+            "corrected_isf_bathy": np.squeeze(geom["corrected_isf_bathy"].values),
             "dGL": get(dm, "dist_gl"),
             "dIF": get(dm, "dist_front"),
-            "entry_depth_max": get(dslope, "entry_depth"),
         }
 
         names = shelf_index(files.masks)
+        scenario = scenario_of(simulation)
+        out: dict[str, dict] = {}
 
         for shelf_name in shelves:
-            shelf = SHELVES[shelf_name]
-            ident = match_shelf(names, shelf)
+            ident = match_shelf(names, SHELVES[shelf_name])
             if ident is None:
-                log(f"  {shelf_name:16s} not present in this archive")
                 continue
-
             mask = (isf == ident) & np.isfinite(melt)
             if mask.sum() < 20:
-                log(f"  {shelf_name:16s} only {int(mask.sum())} valid cells, skipping")
                 continue
-
-            fields, report = assemble(raw, mask, lat)
-            filled = {k: v for k, v in report.items() if v > 0.0}
 
             if dry_run:
-                log(f"  {shelf_name:16s} id={ident:3d} cells={int(mask.sum()):6d} "
-                    f"melt {np.nanmin(melt[mask]):6.2f} to {np.nanmax(melt[mask]):6.2f} m/yr"
-                    + (f"  filled={filled}" if filled else ""))
-                summary[shelf_name] = {"id": ident, "cells": int(mask.sum())}
+                out[shelf_name] = {"cells": int(mask.sum()),
+                                   "melt_min": float(np.nanmin(melt[mask])),
+                                   "melt_max": float(np.nanmax(melt[mask]))}
                 continue
 
-            graph = build_graph(
-                fields, mask, xg, yg, melt, radius=radius,
-                cell_area=25.0e6, shelf=shelf_name,
-                scenario="present_day", simulation=simulation,
-                node_features=NODE_FEATURES)
+            # One unusable shelf must not discard the rest of the year.  Small
+            # cavities occasionally fall outside the valid region of the
+            # temperature field, and aborting here would silently drop every
+            # shelf processed after it.
+            try:
+                fields, report = assemble(raw, mask, lat)
+                graph = build_graph(fields, mask, xg, yg, melt, radius=radius,
+                                    cell_area=CELL_AREA, shelf=shelf_name,
+                                    scenario=scenario, simulation=simulation,
+                                    node_features=NODE_FEATURES)
+            except (ValueError, KeyError) as exc:
+                log(f"    {shelf_name}: skipped -- {exc}")
+                continue
 
-            path = outdir / f"{simulation}_{shelf_name.replace(' ', '_')}.npz"
+            slug = shelf_name.replace(" ", "_")
+            path = outdir / f"{simulation}_{slug}_{year}.npz"
             graph.save(path)
-            log(f"  {graph.summary()}"
-                + (f"  filled={filled}" if filled else ""))
 
-            summary[shelf_name] = {
-                "id": ident, "nodes": graph.n_nodes, "edges": graph.n_edges,
+            out[shelf_name] = {
+                "nodes": graph.n_nodes, "edges": graph.n_edges,
+                "melt_mean": float(graph.y.mean()),
                 "melt_min": float(graph.y.min()), "melt_max": float(graph.y.max()),
-                "melt_mean": float(graph.y.mean()), "path": str(path),
-                "filled_fraction": filled,
+                "path": str(path),
+                "filled": {k: v for k, v in report.items() if v > 0},
             }
 
-    return summary
+    return out
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--simulation", default="OPM021",
-                   help="NEMO run supplying geometry and melt (default: OPM021)")
-    p.add_argument("--mask-simulation", default="SMITH_bf663",
-                   help="run supplying masks, slopes and T/S")
-    p.add_argument("--year", type=int, default=2006)
+    p.add_argument("--simulation", default="SMITH_bf663")
+    p.add_argument("--all-scenarios", action="store_true",
+                   help=f"build both of {SCENARIO_RUNS}")
+    p.add_argument("--years", nargs="*", type=int, default=None,
+                   help="explicit years (default: every --every-th available year)")
+    p.add_argument("--every", type=int, default=10,
+                   help="stride through the available years (default: 10)")
     p.add_argument("--shelves", nargs="*", default=list(SMOKE_TEST_SHELVES))
+    p.add_argument("--all-shelves", action="store_true")
     p.add_argument("--radius", type=float, default=DEFAULT_RADIUS)
     p.add_argument("--root", type=Path, default=RAW_DIR)
     p.add_argument("--outdir", type=Path, default=None)
-    p.add_argument("--dry-run", action="store_true",
-                   help="report cell counts and melt ranges without writing graphs")
+    p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
     ensure_dirs()
     outdir = args.outdir or GRAPH_DIR
     outdir.mkdir(parents=True, exist_ok=True)
 
-    unknown = [s for s in args.shelves if s not in SHELVES]
+    shelves = sorted(SHELVES) if args.all_shelves else args.shelves
+    unknown = [s for s in shelves if s not in SHELVES]
     if unknown:
-        raise SystemExit(f"unknown shelves {unknown}; known: {sorted(SHELVES)}")
+        raise SystemExit(f"unknown shelves {unknown}")
 
-    log(f"building graphs for {args.simulation} ({len(args.shelves)} shelves, "
-        f"radius {args.radius / 1000:.0f} km)")
-    summary = build_for_simulation(
-        args.simulation, args.mask_simulation, args.year, args.shelves,
-        args.radius, args.root, outdir, args.dry_run)
+    runs = list(SCENARIO_RUNS) if args.all_scenarios else [args.simulation]
+    manifest: dict[str, dict] = {}
 
-    if not args.dry_run and summary:
-        (outdir / f"summary_{args.simulation}.json").write_text(
-            json.dumps(summary, indent=2))
-        log(f"wrote {len(summary)} graphs to {outdir}")
+    for simulation in runs:
+        index = discover(simulation, root=args.root)
+        complete = sorted(y for y, f in index.items() if f.complete())
+        if not complete:
+            log(f"{simulation}: no complete years, skipping")
+            continue
+
+        melt_path = find_melt(simulation, root=args.root)
+        geom_path = find_geometry(simulation, root=args.root)
+        if melt_path is None or geom_path is None:
+            log(f"{simulation}: melt={melt_path} geometry={geom_path}, skipping")
+            continue
+
+        years = args.years or complete[::args.every]
+        years = [y for y in years if y in index]
+        log(f"{simulation} ({scenario_of(simulation)}): {len(years)} years "
+            f"{years[0]}-{years[-1]}, {len(shelves)} shelves")
+        log(f"  melt     {melt_path.name}")
+        log(f"  geometry {geom_path.name}")
+
+        with open_dataset(melt_path) as dmelt, open_dataset(geom_path) as dgeom:
+            base = first_year(dgeom) or 1970
+            handles = {"index": index, "melt": dmelt, "geom": dgeom,
+                       "base_year": base}
+            log(f"  years anchored at {base}")
+            for year in years:
+                try:
+                    res = build_year(simulation, year, shelves, args.radius,
+                                     args.root, outdir, args.dry_run, handles)
+                except (KeyError, ValueError, OSError) as exc:
+                    log(f"  {year}: failed -- {exc}")
+                    continue
+                manifest[f"{simulation}_{year}"] = res
+                total = sum(v.get("nodes", v.get("cells", 0)) for v in res.values())
+                log(f"  {year}: {len(res)} shelves, {total} nodes")
+
+    if not args.dry_run and manifest:
+        (outdir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        n = sum(len(v) for v in manifest.values())
+        log(f"wrote {n} graphs to {outdir}")
     return 0
 
 
